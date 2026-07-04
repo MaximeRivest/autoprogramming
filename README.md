@@ -1,87 +1,163 @@
 # AutoProgramming
 
-Define your inputs and outputs, and let AutoProgramming generate the code for you.
+> **⭐ Aspirational — this README is the golden objective.**
+> Nothing described here exists yet. This document is written as if the tool were finished, and it defines what we are building in this repo. When the real behavior and this document disagree, this document wins until we deliberately amend it.
+
+Define your inputs and outputs, and let AutoProgramming find the best implementation.
+
+**Why this is different.** Prompt optimizers (DSPy, GEPA, TextGrad) search over prompts inside a framework you must ship with. In AutoProgramming, a candidate implementation is a **plain `.py` file** — so the search space is anything Python can express (an LLM call, a regex table, scikit-learn, a local transformer, a pipeline of all four), the optimizer is a **coding agent** that reflects, edits, and evaluates, and the output is a **portable Python package** with zero runtime dependence on the optimizer. Optimization happens at dev time; what you ship is just code.
 
 ## Define a program
 
-Types are subclasses of builtins. Docstrings become descriptions.
+Types are subclasses of builtins. Docstrings become descriptions the agent uses.
 
 ```py
 import autoprogramming as ap
 
-class Answer(str): ...
-class Summary(str): ..
+class French(str):
+    """Natural, idiomatic French. Formal register unless the input is casual."""
 
 @ap.program
-def my_program(question: str) -> tuple[Answer, Summary]: ...
+def translate(english: str) -> French:
+    """Translate English text to French."""
 ```
 
-## Initialize manually
+Multiple outputs are a tuple of distinct types (two outputs of the same type is a schema error — output names come from their types):
 
 ```py
-my_program.initialize(
-    instructions="Given a question, produce a response.",
-    descriptions=dict(
-        question="The user's question",
-        Answer="A concise answer",
-        Summary="A brief summary",
-    ),
-    demos=[
-        dict(question="What is the capital of France?", Answer="Paris", Summary="Paris is the capital"),
-    ],
-    model="gpt-4.1",
-    adapter=XMLAdapter(),
-    temperature=0.7,
-    max_tokens=100,
-)
-```
+class Answer(str):
+    """Direct answer to the question, one sentence."""
 
-## Or let AutoProgramming optimize it
-
-```py
-class French(str): ...
+class Confidence(float):
+    """Calibrated probability that the answer is correct, 0.0–1.0."""
 
 @ap.program
-def translate(english: str) -> French: ...
+def qa(question: str) -> tuple[Answer, Confidence]:
+    """Answer a factual question with a calibrated confidence."""
+```
 
-translate.optimize(data=train_df)
-translate.save("translate.ap")
+## Optimize it
+
+```py
+translate.optimize(data=pairs_df, budget=ap.Budget(dollars=20))
+translate.save("translate_ap")
 
 translate("Hello, how are you?")
-# => 'Bonjour, comment ça va?'
+# => French('Bonjour, comment allez-vous ?')
 ```
 
-`.optimize()` uses a coding agent that iterates on instructions, descriptions, demos, adapter, and model config using reflective prompt evolution (inspired by [GEPA](https://github.com/gepa-ai/gepa)).
+`.optimize()` launches a coding agent that iterates on complete implementations — instructions, model choice, SDK, parsing, even the algorithmic approach — using reflective evolution (inspired by [GEPA](https://github.com/gepa-ai/gepa)), under a strict data-splitting discipline described below.
 
-### What the agent actually does
+**Budget is explicit and has units.** `ap.Budget(dollars=20)`, `ap.Budget(eval_calls=2000)`, or `ap.Budget(minutes=30)` — combinable; optimization stops when the first limit is hit. Evaluation cost counts against the budget (LLM candidates cost money to *score*, not just to mutate). There is no default; you must say what you're willing to spend.
 
-Given the program above, `.optimize()` creates a workspace:
+## Data discipline
+
+This is the part most optimizers get wrong, so it is load-bearing here.
+
+On `optimize()`, the data is split **once** into three sets:
+
+| Split | Who touches it | Purpose |
+|-------|---------------|---------|
+| `train` | Agent, freely | Reflection: run candidates, read traces, study failures, mutate |
+| `val` | Scoring harness only | Selection: which candidates survive (Pareto bookkeeping) |
+| `test` | Nobody, until the end | The final report card, evaluated exactly once |
+
+The rules the harness enforces (not the agent's good manners):
+
+- **The agent reflects on `train` failures only.** `prg.run()` and per-row trace inspection are refused on val and test rows. The agent never sees *why* a val row scored low — only the aggregate — so it cannot edit candidates to fix specific val examples.
+- **`val` is for selection, and selection pressure is capped.** Every candidate is scored on the identical val set, and the harness tracks how many candidates have been compared against it. When val has been used to make many selection decisions relative to its size, the harness warns that val scores are losing meaning and refuses to report them as final.
+- **`test` is evaluated once, at the end, on the top candidates only.** The number you tell your boss is the test score. If test drops far below val, the run report says so loudly — that's overfitting to val, and the report shows it instead of hiding it.
+- **Minimum data is enforced, not suggested.** Below ~30 examples, `optimize()` runs in **bootstrap mode**: it will build and compare baseline candidates but refuses to run fine-grained mutation loops, because a 0.92-vs-0.86 difference on 5 val rows is one row of noise. It tells you this and offers to generate synthetic examples for you to validate.
+- **Score differences come with uncertainty.** Candidate comparisons on val report a bootstrap confidence interval; "improved" means the interval excludes zero, not that the point estimate went up.
+- **Memorization is checked.** Any candidate whose train score vastly exceeds its val score, or that contains verbatim training outputs (lookup tables over train inputs), is flagged as a memorizer and excluded from selection. A regex candidate may legitimately win — but only on data it never saw.
+- **Stochastic candidates are scored honestly.** Candidates that call an LLM are evaluated with `n` repeats per row (default 3); the score is the mean, and the report includes the variance. A candidate whose win disappears across repeats didn't win.
+
+## What the agent actually does
+
+`optimize()` creates a workspace that is itself a valid, installable Python package:
 
 ```
-translate.ap/
-├── schema.py              # the @ap.program definition (immutable)
-├── metric.py              # evaluation metric (written by agent)
+translate_ap/
+├── pyproject.toml          # name, deps of the ACTIVE candidate, entry point
+├── __init__.py             # exports `translate`, dispatches to active candidate
+├── schema.py               # the @ap.program definition (immutable)
+├── metric.py               # evaluation metric (agent-proposed, USER-APPROVED)
+├── active.json             # which candidate is live + pinned eval scores
 ├── data/
 │   ├── train.csv
-│   └── val.csv
+│   ├── val.csv
+│   └── test.csv            # harness-controlled; agent cannot eval against it
 ├── candidates/
-│   ├── candidate_0.py     # seed candidate
-│   ├── candidate_1.py     # mutated from 0
-│   └── candidate_2.py     # mutated from 1
-└── scores.json            # per-candidate, per-row scores
+│   ├── candidate_0.py      # seed
+│   ├── candidate_1.py      # mutated from 0
+│   └── candidate_2.py      # mutated from 1
+├── artifacts/              # model weights, pickles, lookup tables (git-lfs friendly)
+└── scores.json             # per-candidate, per-row val scores + repeat variance
 ```
 
-The agent writes the seed candidate — a complete Python module with formatter, SDK call, and parser:
+### The metric is proposed, then approved — never silently trusted
+
+The entire search optimizes whatever `metric.py` says, so a wrong metric produces a confidently-scored wrong program. The agent therefore **proposes** a metric, demonstrates it on real examples, and requires sign-off:
+
+```
+Agent: I propose scoring translations with chrF (character n-gram F-score) — it
+       rewards meaning-preserving variation better than edit distance. Watch it
+       score three examples:
+
+       expected: "Où est la gare ?"
+       predicted: "Où se trouve la gare ?"     → 0.81  (synonymous phrasing, mild penalty)
+       predicted: "Où est la gare ?"           → 1.00  (exact)
+       predicted: "La gare est fermée."        → 0.34  (wrong meaning, big penalty)
+
+       Does 0.81 for the synonymous phrasing match your intuition of "good"?
+       If synonyms should score ~1.0, I'll use embedding similarity instead.
+
+User:  synonyms should be fine → use embeddings.
+```
+
+```py
+# metric.py  — approved by user on 2026-07-04
+from sentence_transformers import SentenceTransformer, util
+
+_model = None
+
+def metric(predicted: str, expected: str) -> float:
+    global _model
+    if _model is None:
+        _model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+    return float(util.cos_sim(_model.encode(predicted), _model.encode(expected)))
+```
+
+For multi-output programs the metric receives and returns per-field scores:
+
+```py
+# metric.py for qa: tuple[Answer, Confidence]
+def metric(predicted: dict, expected: dict) -> dict:
+    return {
+        "Answer": answer_similarity(predicted["Answer"], expected["Answer"]),
+        "Confidence": 1.0 - abs(predicted["Confidence"] - expected["Confidence"]),
+    }
+# aggregate weighting is also part of the user sign-off
+```
+
+The metric file records who approved it and when. Changing the metric invalidates all existing scores (the harness clears `scores.json` — scores under different metrics are never comparable).
+
+### The agent writes candidates
+
+The seed candidate is a complete module. Note: no work at import time — clients and models load lazily, so importing the package never requires an API key or network:
 
 ```py
 # candidates/candidate_0.py
 from openai import OpenAI
 from ..schema import French
 
-client = OpenAI()
+_client = None
 
 def predict(english: str) -> French:
-    response = client.chat.completions.create(
+    global _client
+    if _client is None:
+        _client = OpenAI()
+    response = _client.chat.completions.create(
         model="gpt-4.1-nano",
         messages=[
             {"role": "system", "content": "Translate the following English text to French. Reply with only the translation, nothing else."},
@@ -93,84 +169,53 @@ def predict(english: str) -> French:
     return French(response.choices[0].message.content.strip())
 ```
 
-Writes a metric:
+Each candidate declares its own dependencies in a header the packager reads:
 
 ```py
-# metric.py
-from difflib import SequenceMatcher
-
-def metric(predicted: str, expected: str) -> float:
-    return SequenceMatcher(None, predicted.lower(), expected.lower()).ratio()
+# candidates/candidate_0.py
+# ap-requires: openai>=1.0
 ```
 
-Evaluates:
+The agent evaluates, reflects on **train** failures, then copies and edits the file to create a new candidate:
 
 ```py
-prg.eval("candidate_0")
-# scores.json: {"candidate_0": {"row_0": 0.91, "row_1": 0.85, "row_2": 0.78, "row_3": 0.82, "row_4": 0.95}}
-# avg: 0.86
+prg.eval("candidate_0")               # val score: 0.83 ± 0.04 (n=3 repeats)
+prg.eval("candidate_0", split="train", per_instance=True)
+prg.run("candidate_0", split="train", row=17)   # full trace of a failing train row
+# ... reflect, copy candidate_0 → candidate_1, edit the prompt ...
+prg.eval("candidate_1")               # val score: 0.91 ± 0.03 — CI excludes 0 vs candidate_0, keep
 ```
 
-Reflects on traces of low-scoring rows, then copies and edits the file to create a new candidate:
+Each candidate is a readable, diffable `.py` file. The agent repeats — reflect on train, mutate, select on val — until the budget is exhausted. Then the harness (not the agent) runs the one-time test evaluation on the top candidates and activates the winner:
 
 ```py
-# candidates/candidate_1.py  (copied from candidate_0.py, prompt mutated)
-from openai import OpenAI
-from ..schema import French
-
-client = OpenAI()
-
-def predict(english: str) -> French:
-    response = client.chat.completions.create(
-        model="gpt-4.1-nano",
-        messages=[
-            {"role": "system", "content": (
-                "Translate the following English text to French. "
-                "Use simple, direct phrasing. Prefer short forms "
-                "(e.g. 'Où est' over 'Où se trouve'). "
-                "Reply with only the translation, nothing else."
-            )},
-            {"role": "user", "content": english},
-        ],
-        temperature=0.0,
-        max_tokens=256,
-    )
-    return French(response.choices[0].message.content.strip())
-```
-
-```py
-prg.eval("candidate_1")
-# avg: 0.92 — better, keep it
-```
-
-Each candidate is a readable, diffable `.py` file. The agent repeats — reflect, copy, edit, evaluate — until the budget is exhausted. Then:
-
-```py
-prg.best()        # => "candidate_1"
-prg.activate("candidate_1")
+prg.finalize()
+# test scores (evaluated once):
+#   candidate_1: 0.89   (val was 0.91 — healthy gap)
+#   candidate_4: 0.84   (val was 0.92 — overfit to val, demoted)
+# activated: candidate_1
 ```
 
 ## Agent API
 
-The agent uses file operations and these helpers:
+Inside the optimization loop, the agent holds `prg` — the agent-side handle to the same program you call `translate` on the outside. Two names, one object, two trust levels: `prg` can create and score candidates; `translate` can only run the active one.
 
 ```py
-prg.schema                                    # inspect inputs/outputs
-prg.eval("candidate_0")                       # run candidate against val data
-prg.eval("candidate_0", per_instance=True)    # per-row scores
-prg.run("candidate_0", english="Hello")       # single run with trace
-prg.best()                                    # best candidate by aggregate score
-prg.activate("candidate_1")                   # set as the live one
-prg.data.train                                # training data
-prg.data.val                                  # validation data
-prg.data.sample(20)                           # random minibatch
+prg.schema                                   # inspect inputs/outputs & docstrings
+prg.eval("candidate_0")                      # score on val (aggregate only, with CI)
+prg.eval("candidate_0", split="train", per_instance=True)   # per-row, train only
+prg.run("candidate_0", split="train", row=17)  # single traced run — train rows only
+prg.frontier()                               # Pareto frontier: best candidate per train row
+prg.data.train                               # readable
+prg.data.val                                 # scoring only — rows not readable
+prg.budget                                   # remaining dollars / eval calls / time
 ```
 
-Everything else — creating candidates, editing prompts, changing SDKs, rewriting parsers — is just file operations on `candidates/*.py`.
+Everything else — creating candidates, editing prompts, changing SDKs, rewriting parsers — is file operations on `candidates/*.py`. There is deliberately no `prg.eval(split="test")`: test belongs to `finalize()`.
 
 ## Use it like a normal function
 
-A `.ap` directory is a Python package. Import and call it:
+The workspace is a normal Python package (underscore name — it's importable):
 
 ```py
 from translate_ap import translate
@@ -179,106 +224,99 @@ translate("Hello, how are you?")
 # => French('Bonjour, comment allez-vous ?')
 ```
 
-It's just a function. The return type is `French`, which is a `str` subclass — works everywhere a string does.
+`French` is a `str` subclass — works everywhere a string does.
 
-### Log inputs/outputs for later
+**What `activate()` does, mechanically:** it writes `active.json` with the chosen candidate's name and its pinned test score, and regenerates `pyproject.toml` so the package's dependencies are exactly the active candidate's `ap-requires` lines (plus its artifacts). `__init__.py` reads `active.json` and imports that one candidate. Switching candidates is a one-line diff you can review, commit, and revert.
+
+### Log production traffic
 
 ```py
 translate.enable_logging()
 
 translate("Where is the train station?")
 # => French('Où est la gare ?')
-# also writes to translate.ap/logs/2026-03-30.jsonl
+# appends to translate_ap/logs/2026-07-04.jsonl
 ```
 
 ```json
-{"english": "Where is the train station?", "French": "Où est la gare ?", "timestamp": "2026-03-30T14:22:01Z"}
+{"inputs": {"english": "Where is the train station?"}, "outputs": {"French": "Où est la gare ?"}, "candidate": "candidate_1", "n_repeat": 1, "timestamp": "2026-07-04T14:22:01Z"}
 ```
 
-Logs accumulate as JSONL. Use them later to evaluate, retrain, or distill to a smaller model:
+Input keys are parameter names; output keys are output type names (guaranteed unique by the schema rule above). Inputs and outputs live in separate objects, so they can never collide.
+
+### Improve from production — two different things
+
+**Distill** — compress the current program into something cheaper. Logs are perfect for this: the program's own outputs *are* the training target, because the goal is imitation:
 
 ```py
-# re-optimize using production traffic
-translate.optimize(data="logs")
-
-# or distill the prompt-based program into a fine-tuned small model
-translate.distill(model="gpt-4.1-nano", data="logs", output="translate-ft.ap")
+translate.distill(model="gpt-4.1-nano", data="logs", output="translate_ft_ap")
 ```
+
+**Re-optimize** — make the program *better*. Logs alone cannot do this: they record what the current program predicted, and optimizing toward your own outputs reinforces your own errors. Re-optimization requires a correction signal:
+
+```py
+# a human (or downstream check) marks/corrects log entries...
+translate.review_logs()            # TUI: accept / correct / reject each sampled entry
+
+# ...and only the corrected entries become new training data
+translate.optimize(data="logs:reviewed", budget=ap.Budget(dollars=10))
+```
+
+`optimize(data="logs")` without review is an error, with a message explaining exactly this.
 
 ### Distribute
 
-It's a directory with `.py` files — publish it however you publish Python:
+It's a package with a `pyproject.toml`, so it distributes like one:
 
 ```sh
-# as a package
-pip install ./translate.ap
-
-# or just copy the directory
-cp -r translate.ap /path/to/other/project/
-
-# or zip it
-zip -r translate.ap.zip translate.ap/
+pip install ./translate_ap          # deps of the active candidate install automatically
 ```
 
-## How the agent builds a program
+Heavy candidates keep their weights in `artifacts/` (tracked with git-lfs) or declare a download step (`# ap-fetch: huggingface:Helsinki-NLP/opus-mt-en-fr`) that runs on first use. Zipping the directory works too — `artifacts/` goes with it.
 
-When a user says "I want a translator", the agent asks 4 questions, then explores freely.
+## Building a program conversationally
 
-### Questions the agent asks
+`@ap.program` + `.optimize()` is the library API. The conversational flow is a front-end to the *same* API: when you tell the agent "I want a translator", the conversation's job is to produce the decorator, the data, the budget, and the approved metric — then it calls `optimize()` like anyone else would. Five questions:
 
-**1. What goes in, what comes out?**
+**1. What goes in, what comes out?** The schema. "English in, French out" is enough; so is "CSV row in, (label, confidence) out". Becomes the `@ap.program` definition.
 
-The schema. "English text in, French text out" is enough. Could also be "CSV row in, (label, confidence) out" or "image path in, description out". This defines the types.
+**2. Do you have examples?** 30+ pairs unlocks full optimization; 5–10 gets bootstrap mode. If none: "Can I generate synthetic pairs and you validate a sample?"
 
-**2. Do you have examples?**
+**3. What does "good" mean?** Exact match? Same meaning? Latency under 100ms? Cost under $0.001/call? Shapes the metric proposal.
 
-Even 5-10 input/output pairs are enough to start. If not: "Can I generate synthetic pairs and you validate a few?"
+**4. Sign off on the metric.** The agent shows the proposed metric scoring real examples (as above) and iterates until the scores match your intuition. *This is the most important question — everything downstream optimizes this number.*
 
-**3. What does "good" mean to you?**
+**5. Any constraints?** Data allowed to leave the machine? Max cost per call? Offline? Which packages may be installed? Narrows the search space and configures the sandbox.
 
-Exact match? Semantic similarity? Latency under 100ms? Cost under $0.001/call? This shapes the metric and what approaches are worth exploring.
+Everything else the agent figures out on its own.
 
-**4. Any constraints?**
+## What the agent explores
 
-Can data go to external APIs or must it stay local? Max cost per call? Must it run offline? This narrows the search space.
+A candidate is just a `predict` function — the agent can write anything:
 
-That's it. Everything else the agent figures out on its own.
+**LLM call** — prompt engineering, SDK choice, model selection (see `candidate_0` above).
 
-### What the agent explores
-
-LLM prompting is one option. But a candidate is just a `.py` file with a `predict` function — the agent can write anything:
-
-**LLM call** — prompt engineering, SDK choice, model selection:
-```py
-# candidates/candidate_0.py
-def predict(english: str) -> French:
-    response = openai.chat.completions.create(...)
-    return French(response.choices[0].message.content.strip())
-```
-
-**Classical ML** — feature engineering, scikit-learn, lightweight and fast:
+**Classical ML** — lightweight and fast:
 ```py
 # candidates/candidate_3.py
+# ap-requires: scikit-learn>=1.4
 import pickle
-from sklearn.pipeline import Pipeline
+from ..paths import artifacts    # ap-provided: resolves to the package's artifacts/ dir
 
-model = pickle.loads((_root / "model.pkl").read_bytes())
+_model = None
 
 def predict(english: str) -> French:
-    return French(model.predict([english])[0])
+    global _model
+    if _model is None:
+        _model = pickle.loads((artifacts / "candidate_3_model.pkl").read_bytes())
+    return French(_model.predict([english])[0])
 ```
 
-**Regex / rule-based** — when patterns are enough:
+**Rules / regex** — when patterns are enough (and it generalizes past train — the memorization check applies):
 ```py
 # candidates/candidate_4.py
 import re
-
-RULES = {
-    r"\bhello\b": "bonjour",
-    r"\bthank you\b": "merci",
-    r"\bplease\b": "s'il vous plaît",
-    ...
-}
+RULES = {r"\bhello\b": "bonjour", r"\bthank you\b": "merci", ...}
 
 def predict(english: str) -> French:
     result = english.lower()
@@ -287,118 +325,66 @@ def predict(english: str) -> French:
     return French(result)
 ```
 
-**Deep learning** — fine-tuned transformer, runs locally:
+**Local deep learning** — no API cost per call:
 ```py
 # candidates/candidate_5.py
+# ap-requires: transformers>=4.40, torch
+# ap-fetch: huggingface:Helsinki-NLP/opus-mt-en-fr
 from transformers import MarianMTModel, MarianTokenizer
 
-model_name = "Helsinki-NLP/opus-mt-en-fr"
-tokenizer = MarianTokenizer.from_pretrained(model_name)
-model = MarianMTModel.from_pretrained(model_name)
+_tok, _model = None, None
 
 def predict(english: str) -> French:
-    tokens = tokenizer(english, return_tensors="pt", padding=True)
-    translated = model.generate(**tokens)
-    return French(tokenizer.decode(translated[0], skip_special_tokens=True))
+    global _tok, _model
+    if _model is None:
+        _tok = MarianTokenizer.from_pretrained("Helsinki-NLP/opus-mt-en-fr")
+        _model = MarianMTModel.from_pretrained("Helsinki-NLP/opus-mt-en-fr")
+    tokens = _tok(english, return_tensors="pt", padding=True)
+    return French(_tok.decode(_model.generate(**tokens)[0], skip_special_tokens=True))
 ```
 
-**Decomposed pipeline** — combine approaches, each handling what it's best at:
-```py
-# candidates/candidate_6.py
-import re
-from transformers import MarianMTModel, MarianTokenizer
-from openai import OpenAI
+**Decomposed pipeline** — idiom table → local model → LLM refinement for long sentences, each part handling what it's best at.
 
-# local model for bulk translation
-tokenizer = MarianTokenizer.from_pretrained("Helsinki-NLP/opus-mt-en-fr")
-model = MarianMTModel.from_pretrained("Helsinki-NLP/opus-mt-en-fr")
-client = OpenAI()
+The agent tries different approaches, scores them on the same val set with the same approved metric, and keeps what wins. A rule-based candidate that scores 0.95 beats an LLM candidate that scores 0.90 — *provided the confidence intervals separate and the memorization check passes*. The agent doesn't care how it works, only that it satisfies the schema and honestly beats the alternatives.
 
-IDIOMS = {
-    "raining cats and dogs": "il pleut des cordes",
-    "break a leg": "bonne chance",
-    "piece of cake": "un jeu d'enfant",
-}
+## Execution model & trust
 
-def predict(english: str) -> French:
-    # step 1: regex substitution for known idioms
-    text = english.lower()
-    for idiom, translation in IDIOMS.items():
-        if idiom in text:
-            return French(re.sub(re.escape(idiom), translation, text, flags=re.IGNORECASE))
+The agent writes and runs code, and installs packages. That happens inside a sandbox, not on your bare machine:
 
-    # step 2: local model for simple sentences
-    tokens = tokenizer(english, return_tensors="pt", padding=True)
-    translated = model.generate(**tokens)
-    result = tokenizer.decode(translated[0], skip_special_tokens=True)
-
-    # step 3: LLM refinement only if local model confidence is low
-    if len(english.split()) > 15:
-        response = client.chat.completions.create(
-            model="gpt-4.1-nano",
-            messages=[
-                {"role": "system", "content": "Refine this French translation for naturalness. Reply with only the translation."},
-                {"role": "user", "content": f"English: {english}\nDraft: {result}"},
-            ],
-            temperature=0.0,
-        )
-        result = response.choices[0].message.content.strip()
-
-    return French(result)
-```
-
-The agent tries different approaches, evaluates them on the same data with the same metric, and keeps the best. A regex candidate that scores 0.95 beats an LLM candidate that scores 0.90 — the agent doesn't care how it works, only that it satisfies the schema and the metric.
+- Candidates execute in an isolated environment with access to `data/`, `artifacts/`, and (if question 5 allowed it) the network.
+- `pip install` is restricted to an allowlist derived from question 5; anything outside it prompts you.
+- Your data leaves the machine only via APIs you approved in question 5. "Must stay local" means LLM-API candidates are simply not in the search space.
+- Every candidate the agent produces is a small, readable `.py` file — review the winner before you `activate` it, the same way you'd review a PR.
 
 ### Tools the agent needs
 
 ```
-filesystem       create .ap dir, write candidates, copy/edit .py files
-python_repl      run candidates, evaluate, inspect traces
-llm_apis         call OpenAI / Anthropic / Gemini from candidate code
-web_search       look up domain knowledge, find pretrained models
-pip_install      install libraries candidates need (transformers, sklearn, etc.)
-user_confirm     show synthetic data or ask clarifying questions
-prg.eval()       score a candidate against train/val data
-prg.run()        single call with trace for debugging
-prg.data         access train/val splits
+filesystem       create the workspace, write/copy/edit candidate files
+python_repl      run candidates in the sandbox, inspect traces
+llm_apis         call approved providers from candidate code
+web_search       domain knowledge, pretrained model discovery
+pip_install      allowlisted installs into the sandbox
+user_confirm     metric sign-off, synthetic-data validation, allowlist escalations
+prg.*            eval / traced runs / frontier / budget (as above)
 ```
 
-### Exploration strategy
+## Exploration strategy
 
-The agent follows a structured search to avoid wasting budget on redundant candidates.
+Structured search, so budget isn't wasted on redundant candidates.
 
-**Phase 1: Baseline sweep.** Start cheap and fast to establish a floor.
+**Phase 1: Baseline sweep (~10% of budget).** Establish the floor and a cheap ceiling estimate:
+1. A trivial candidate (rules, lookup, simplest heuristic) — candidate_0, which everything must beat.
+2. The cheapest viable LLM with a minimal prompt — often already hard to beat.
+3. A pretrained model, if one exists for the domain.
 
-1. Write a trivial candidate first (regex, lookup table, or simplest possible heuristic). This is candidate_0 — the baseline everything else must beat.
-2. Try the cheapest LLM (gpt-4.1-nano, haiku) with a minimal prompt. Often this is already hard to beat.
-3. Try a pretrained model if one exists for the domain (e.g. Helsinki-NLP/opus-mt-en-fr for translation, a sentence-transformers model for classification).
+**Phase 2: Targeted mutation (~60%).** Improve the leader by studying its **train** failures:
+1. `prg.eval(best, split="train", per_instance=True)` — find the worst train rows.
+2. `prg.run(best, split="train", row=…)` — read full traces to understand *why*.
+3. Copy, make **one** targeted edit (prompt, model, parsing, or a preprocessing step — never several at once, or improvement can't be attributed).
+4. `prg.eval(new)` on val. Keep only if the confidence interval vs the parent excludes zero.
 
-Evaluate all three. Now you know: what's the floor, what's the ceiling, and where the gap is.
+**Phase 3: Structural exploration (~20%).** When mutation plateaus (3 consecutive non-improvements), change the approach: LLM → local model, single model → decomposed pipeline, expensive winner → distilled cheap version.
 
-**Phase 2: Targeted mutation.** Improve the best candidate by reflecting on its failures.
+**Phase 4: Finalize (~10%).** The harness re-scores the top candidates on val with extra repeats, then runs the **one-time test evaluation** and activates the winner. Val-vs-test gaps are reported per candidate; a candidate that collapses on test is demoted no matter its val rank.
 
-1. Run `prg.eval(best, per_instance=True)` — find the rows that score lowest.
-2. Run `prg.run(best, ...)` on those rows with tracing — read the full trace to understand *why* it failed.
-3. Copy the best candidate, make a targeted edit that addresses the failure mode.
-4. Evaluate the new candidate. Keep it only if it improves val_avg.
-
-Each iteration should change one thing: the prompt, the model, the parsing logic, a preprocessing step. Never change everything at once — you can't attribute improvement.
-
-**Phase 3: Structural exploration.** If targeted mutations plateau, try a different approach entirely.
-
-- If an LLM candidate plateaus, try a local model or a pipeline.
-- If a single model plateaus, decompose the problem (e.g. idiom detection + translation + refinement).
-- If cost is a constraint, try distilling the best LLM candidate into a smaller model or a rule set.
-
-**Phase 4: Pareto selection.** Maintain diversity across candidates.
-
-Don't just keep the single best. Track which candidate scores best on *each row*. A candidate that's worse on average but best on specific hard examples carries information. When mutating, sample from the Pareto frontier — candidates that are best at something — not just the global best. This prevents getting stuck in a local optimum.
-
-**Budget discipline:**
-
-- Spend ~10% of budget on Phase 1 (baselines).
-- Spend ~60% on Phase 2 (targeted mutation of the most promising approach).
-- Spend ~20% on Phase 3 (structural alternatives).
-- Spend ~10% on re-evaluating top candidates on full val set at the end.
-- Stop mutating a candidate after 3 consecutive failures to improve. Move to a different ancestor or a different approach.
-- Every candidate must be evaluated on the same val set. No exceptions — otherwise scores aren't comparable.
+**Diversity via Pareto.** Don't keep only the global best. `prg.frontier()` tracks which candidate is best on *each train row*; a candidate that's worse on average but uniquely solves hard rows carries information. Mutation ancestors are sampled from the frontier, not just the leader — this is what keeps the search out of local optima.
