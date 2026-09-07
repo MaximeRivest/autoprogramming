@@ -1,11 +1,15 @@
 # AutoProgramming
 
-> **⭐ Aspirational — this README is the golden objective.**
-> Nothing described here exists yet. This document is written as if the tool were finished, and it defines what we are building in this repo. When the real behavior and this document disagree, this document wins until we deliberately amend it.
+> **Experimental, implemented library (v0.2).**
+> The core API, guarded evaluation harness, package workspace, multi-objective
+> scoring, and Pi portfolio backend are implemented and tested. The remaining
+> security limitation is explicit: cooperative path isolation is not an
+> adversarial OS sandbox; `strict_isolation=True` currently refuses rather than
+> silently weakening that guarantee.
 
 Define your inputs and outputs, and let AutoProgramming find the best implementation.
 
-**Why this is different.** Prompt optimizers (DSPy, GEPA, TextGrad) search over prompts inside a framework you must ship with. In AutoProgramming, a candidate implementation is a **plain `.py` file** — so the search space is anything Python can express (an LLM call, a regex table, scikit-learn, a local transformer, a pipeline of all four), the optimizer is a **coding agent** that reflects, edits, and evaluates, and the output is a **portable Python package** with zero runtime dependence on the optimizer. Optimization happens at dev time; what you ship is just code.
+**Why this is different.** Prompt optimizers (DSPy, GEPA, TextGrad) search over prompts inside a framework you must ship with. In AutoProgramming, a candidate implementation is a **plain `.py` file** — so the search space is anything Python can express (an LLM call, a regex table, scikit-learn, a local transformer, a pipeline of all four), and the optimizer is a **coding agent** that reflects, edits, and evaluates. Most frontier points ship as ordinary portable code with no optimizer dependency. A Pi-subscription-backed runtime is also allowed as an explicitly labelled frontier point (`requires Pi + login`), so the user—not an early feasibility heuristic—decides whether that restriction is acceptable.
 
 ## Define a program
 
@@ -48,7 +52,58 @@ translate("Hello, how are you?")
 
 `.optimize()` launches a coding agent that iterates on complete implementations — instructions, model choice, SDK, parsing, even the algorithmic approach — using reflective evolution (inspired by [GEPA](https://github.com/gepa-ai/gepa)), under a strict data-splitting discipline described below.
 
-**Budget is explicit and has units.** `ap.Budget(dollars=20)`, `ap.Budget(eval_calls=2000)`, or `ap.Budget(minutes=30)` — combinable; optimization stops when the first limit is hit. Evaluation cost counts against the budget (LLM candidates cost money to *score*, not just to mutate). There is no default; you must say what you're willing to spend.
+**Budget is explicit and has units.** `ap.Budget(dollars=20)`, `ap.Budget(eval_calls=2000)`, or `ap.Budget(minutes=30)` — combinable; optimization stops when the first limit is hit. Evaluation cost and Pi orchestrator/worker cost count against the dollar budget. There is no default; you must say what you're willing to spend.
+
+## Orchestrated portfolio search with Pi
+
+The Pi model already speaking with the human is the strategy orchestrator, not a candidate author. In a live Pi session AutoProgramming uses `HostOrchestratorBackend` and never starts a second strategy process; this preserves the user's requirements, research, and failure reasoning in one conversation. A trusted Python controller launches only isolated implementation workers and independent auditors. Workers receive a generic function contract, development examples, their assigned mechanism, and their own files—never optimizer context, metric code or weights, scores, other workers, val, or test.
+
+Before planning, the host runs and records current web searches. It then plans across runtime agents, model graphs, single calls, fine-tunes, specialized models, classical ML, and direct code/rules. Mechanisms are hard contracts, but engineering plans are adaptable: workers may change package/model variants within the family, batching, parsing, device placement, and setup. A broken worker, malformed output, noncompliant fallback, or suspicious zero result does not satisfy breadth. The controller investigates, repairs, and requests a materially independent configuration; ambiguity pauses for the human.
+
+Search is breadth-first by policy: every feasible family must produce evaluated faithful evidence or be explicitly excluded by the human, each successful family gets a second independent pass, and only then does the host allocate deeper rounds and cross-tier composition. See [`docs/orchestrated-search.md`](docs/orchestrated-search.md).
+
+Search-time hardware and deployment-time resources are separate contracts:
+
+```py
+resources = ap.Resources(
+    search=ap.SearchResources(
+        max_parallel_agents=4,
+        max_dollars_per_agent_call=0.05,  # reserves in-flight budget headroom
+        candidate_api_providers=(),
+        allow_package_installs=True,
+        allow_model_downloads=True,
+        # The active Pi model/thinking level is captured automatically.
+        # If offered: remote_compute=ap.RemoteCompute(
+        #     endpoint="...", transport="ssh", ...)
+        # Transport is explicit; AutoProgramming never assumes remote means SSH.
+    ),
+    runtime=ap.RuntimeResources(network=False),
+    data=ap.DataPolicy(external_egress=True),  # permits abstract web-research queries
+    confirmed=True,
+)
+
+prepared = translate.prepare(
+    pairs_df, resources=resources, budget=ap.Budget(dollars=2)
+)
+prg = ap.attach(prepared.workspace.root)
+# The current Pi session proposes/demonstrates the metric suite and obtains sign-off.
+print(prg.web_search("latest efficient approaches for <abstract task>"))
+print(prg.web_search("2026 open source <task> benchmark models"))
+prg.plan_portfolio(web_informed_avenue_specs)
+prg.orchestrate_portfolio("breadth", budget=ap.Budget(dollars=20))
+state = prg.portfolio_status()
+prg.orchestrate_portfolio("deepen", avenue_ids=[...])
+prg.orchestrate_portfolio("compose")
+report = prg.finalize()
+```
+
+Hardware can be detected, but AutoProgramming never interprets a network connection, GPU, or remote address as permission. Remote compute is used only when the user supplies `RemoteCompute`; then heavy worker/evaluation operations are staged there while orchestration stays local. Pi-runtime candidates stay beside the authenticated host because they are network-bound and OAuth credentials are never copied to the target. GPU-heavy avenues use per-target concurrency/VRAM admission (one concurrent GPU job and an 80%-free floor when card VRAM is supplied, both configurable), so contention and OOM trigger waiting/exclusive retry rather than a false approach failure.
+
+Pi subscription access is discovered from Pi's authenticated model registry and stored only as provider/model capability names—OAuth tokens remain in Pi's auth store. Workers default to the exact host model and thinking level; the host may deliberately assign another discovered subscription model. A Pi-backed candidate uses Pi CLI/RPC without raw API keys and its final-report entry states the deployment requirement. Under a dollar budget, parallel calls reserve confirmed headroom. For an explicitly headless run, pass `PiOrchestratorBackend(...)`; live Pi sessions use the same-session host instead.
+
+Metric suites distinguish **acceptance lenses** (user-approved and eligible to choose the final program) from **diagnostic lenses** (orchestrator-managed search feedback). Suite-aware search uses acceptance floors and a Pareto frontier rather than requiring one weighted scalar. The legacy primary remains a report headline for older workspaces.
+
+If bounded implementation diagnosis, same-family repairs, an independent configuration, and resource verification still leave an approach blocked, the controller pauses for human confirmation instead of silently dropping it. The user can fix the capability and request a retry, or explicitly confirm exclusion with `prg.resolve_blocker(...)`; fallback code is never the answer.
 
 ## Data discipline
 
@@ -85,8 +140,10 @@ translate_ap/
 ├── active.json             # which candidate is live + pinned eval scores
 ├── data/
 │   ├── train.csv
-│   ├── val.csv
-│   └── test.csv            # harness-controlled; agent cannot eval against it
+│   ├── val.csv              # legacy/manual workspaces
+│   └── test.csv             # legacy/manual workspaces
+# Resource-confirmed Pi runs keep val/test in controller-private storage,
+# outside this coding-agent workspace.
 ├── candidates/
 │   ├── candidate_0.py      # seed
 │   ├── candidate_1.py      # mutated from 0
@@ -144,12 +201,19 @@ The metric file records who approved it and when. Changing the metric invalidate
 
 ### The agent writes candidates
 
-The seed candidate is a complete module. Note: no work at import time — clients and models load lazily, so importing the package never requires an API key or network:
+Every candidate is a **PEP 723 single-file script** — inline metadata that `uv run` understands natively. The seed candidate is a complete module. Note: no work at import time — clients and models load lazily, so importing the package never requires an API key or network:
 
 ```py
 # candidates/candidate_0.py
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["openai>=1.0", "translate-ap"]
+#
+# [tool.uv.sources]
+# translate-ap = { path = "..", editable = true }
+# ///
 from openai import OpenAI
-from ..schema import French
+from translate_ap.schema import French
 
 _client = None
 
@@ -167,14 +231,30 @@ def predict(english: str) -> French:
         max_tokens=256,
     )
     return French(response.choices[0].message.content.strip())
+
+if __name__ == "__main__":
+    import sys
+    print(predict(sys.argv[1]))
 ```
 
-Each candidate declares its own dependencies in a header the packager reads:
+This buys three things at once:
 
-```py
-# candidates/candidate_0.py
-# ap-requires: openai>=1.0
+```sh
+uv run candidates/candidate_0.py "Hello, how are you?"
+# => Bonjour, comment allez-vous ?
 ```
+
+- **Every candidate runs standalone.** `uv run` reads the `# /// script` block, builds an ephemeral venv with exactly that candidate's deps, and executes it. Debugging a candidate is running a file — no project setup.
+- **Candidates with conflicting dependencies coexist.** candidate_2 can need `transformers==4.40` while candidate_5 needs `4.51`; the eval harness runs each in its own uv-resolved environment. Stable, dependency-keyed drivers let UV reuse environments instead of creating one for every evaluation call. The dependency solver is uv's, not ours.
+- **The packager reads the same block.** No parallel metadata format to keep in sync — the active candidate's `dependencies` list *is* the package's dependency list.
+
+Implementation workers use an AutoProgramming-owned UV cache under
+`~/.cache/ap-work/<run>/`. Successful finalization removes only owned local and
+remote UV caches and disposable `.venv*` directories. Worker source, artifacts,
+outputs, and inactive-candidate diagnostics remain available for downstream
+evaluation. Paused runs retain package caches unless you explicitly call
+`prg.cleanup_search_cache(force=True)`. Existing global UV cache left by older
+versions can be reclaimed once with `uv cache prune`.
 
 The agent evaluates, reflects on **train** failures, then copies and edits the file to create a new candidate:
 
@@ -202,10 +282,15 @@ Inside the optimization loop, the agent holds `prg` — the agent-side handle to
 
 ```py
 prg.schema                                   # inspect inputs/outputs & docstrings
-prg.eval("candidate_0")                      # score on val (aggregate only, with CI)
+prg.web_search("latest ...")                 # host research; run 2+ before planning
+prg.plan_portfolio([...])                    # authored by the current Pi session
+prg.orchestrate_portfolio("breadth")         # controller launches workers, not strategy
+prg.portfolio_status()                       # audits/failures/objectives for host review
+prg.eval("candidate_0")                      # manual/legacy val scoring
 prg.eval("candidate_0", split="train", per_instance=True)   # per-row, train only
 prg.run("candidate_0", split="train", row=17)  # single traced run — train rows only
 prg.frontier()                               # Pareto frontier: best candidate per train row
+prg.tradeoffs()                              # quality / cost / latency frontier
 prg.data.train                               # readable
 prg.data.val                                 # scoring only — rows not readable
 prg.budget                                   # remaining dollars / eval calls / time
@@ -226,7 +311,7 @@ translate("Hello, how are you?")
 
 `French` is a `str` subclass — works everywhere a string does.
 
-**What `activate()` does, mechanically:** it writes `active.json` with the chosen candidate's name and its pinned test score, and regenerates `pyproject.toml` so the package's dependencies are exactly the active candidate's `ap-requires` lines (plus its artifacts). `__init__.py` reads `active.json` and imports that one candidate. Switching candidates is a one-line diff you can review, commit, and revert.
+**What `activate()` does, mechanically:** it writes `active.json` with the chosen candidate's name and its pinned test score, and regenerates `pyproject.toml` so the package's dependencies are exactly the active candidate's PEP 723 `dependencies` list (minus the self-reference, plus its artifacts). `__init__.py` reads `active.json` and imports that one candidate. Switching candidates is a one-line diff you can review, commit, and revert.
 
 ### Log production traffic
 
@@ -249,7 +334,10 @@ Input keys are parameter names; output keys are output type names (guaranteed un
 **Distill** — compress the current program into something cheaper. Logs are perfect for this: the program's own outputs *are* the training target, because the goal is imitation:
 
 ```py
-translate.distill(model="gpt-4.1-nano", data="logs", output="translate_ft_ap")
+translate.distill(
+    model="gpt-4.1-nano", data="logs", output="translate_ft_ap",
+    budget=ap.Budget(dollars=5),
+)
 ```
 
 **Re-optimize** — make the program *better*. Logs alone cannot do this: they record what the current program predicted, and optimizing toward your own outputs reinforces your own errors. Re-optimization requires a correction signal:
@@ -272,7 +360,7 @@ It's a package with a `pyproject.toml`, so it distributes like one:
 pip install ./translate_ap          # deps of the active candidate install automatically
 ```
 
-Heavy candidates keep their weights in `artifacts/` (tracked with git-lfs) or declare a download step (`# ap-fetch: huggingface:Helsinki-NLP/opus-mt-en-fr`) that runs on first use. Zipping the directory works too — `artifacts/` goes with it.
+Heavy candidates keep their weights in `artifacts/` (tracked with git-lfs). A PEP 723 hint such as `[tool.ap] fetch = ["huggingface:Helsinki-NLP/opus-mt-en-fr"]` records the artifact source for tooling, but candidates must currently implement their own lazy first-use download. Zipping the directory works too — `artifacts/` goes with it.
 
 ## Building a program conversationally
 
@@ -299,9 +387,13 @@ A candidate is just a `predict` function — the agent can write anything:
 **Classical ML** — lightweight and fast:
 ```py
 # candidates/candidate_3.py
-# ap-requires: scikit-learn>=1.4
+# /// script
+# dependencies = ["scikit-learn>=1.4", "translate-ap"]
+# [tool.uv.sources]
+# translate-ap = { path = "..", editable = true }
+# ///
 import pickle
-from ..paths import artifacts    # ap-provided: resolves to the package's artifacts/ dir
+from translate_ap.paths import artifacts   # resolves to the package's artifacts/ dir
 
 _model = None
 
@@ -328,8 +420,13 @@ def predict(english: str) -> French:
 **Local deep learning** — no API cost per call:
 ```py
 # candidates/candidate_5.py
-# ap-requires: transformers>=4.40, torch
-# ap-fetch: huggingface:Helsinki-NLP/opus-mt-en-fr
+# /// script
+# dependencies = ["transformers>=4.40", "torch", "translate-ap"]
+# [tool.uv.sources]
+# translate-ap = { path = "..", editable = true }
+# [tool.ap]
+# fetch = ["huggingface:Helsinki-NLP/opus-mt-en-fr"]
+# ///
 from transformers import MarianMTModel, MarianTokenizer
 
 _tok, _model = None, None
@@ -346,45 +443,3 @@ def predict(english: str) -> French:
 **Decomposed pipeline** — idiom table → local model → LLM refinement for long sentences, each part handling what it's best at.
 
 The agent tries different approaches, scores them on the same val set with the same approved metric, and keeps what wins. A rule-based candidate that scores 0.95 beats an LLM candidate that scores 0.90 — *provided the confidence intervals separate and the memorization check passes*. The agent doesn't care how it works, only that it satisfies the schema and honestly beats the alternatives.
-
-## Execution model & trust
-
-The agent writes and runs code, and installs packages. That happens inside a sandbox, not on your bare machine:
-
-- Candidates execute in an isolated environment with access to `data/`, `artifacts/`, and (if question 5 allowed it) the network.
-- `pip install` is restricted to an allowlist derived from question 5; anything outside it prompts you.
-- Your data leaves the machine only via APIs you approved in question 5. "Must stay local" means LLM-API candidates are simply not in the search space.
-- Every candidate the agent produces is a small, readable `.py` file — review the winner before you `activate` it, the same way you'd review a PR.
-
-### Tools the agent needs
-
-```
-filesystem       create the workspace, write/copy/edit candidate files
-python_repl      run candidates in the sandbox, inspect traces
-llm_apis         call approved providers from candidate code
-web_search       domain knowledge, pretrained model discovery
-pip_install      allowlisted installs into the sandbox
-user_confirm     metric sign-off, synthetic-data validation, allowlist escalations
-prg.*            eval / traced runs / frontier / budget (as above)
-```
-
-## Exploration strategy
-
-Structured search, so budget isn't wasted on redundant candidates.
-
-**Phase 1: Baseline sweep (~10% of budget).** Establish the floor and a cheap ceiling estimate:
-1. A trivial candidate (rules, lookup, simplest heuristic) — candidate_0, which everything must beat.
-2. The cheapest viable LLM with a minimal prompt — often already hard to beat.
-3. A pretrained model, if one exists for the domain.
-
-**Phase 2: Targeted mutation (~60%).** Improve the leader by studying its **train** failures:
-1. `prg.eval(best, split="train", per_instance=True)` — find the worst train rows.
-2. `prg.run(best, split="train", row=…)` — read full traces to understand *why*.
-3. Copy, make **one** targeted edit (prompt, model, parsing, or a preprocessing step — never several at once, or improvement can't be attributed).
-4. `prg.eval(new)` on val. Keep only if the confidence interval vs the parent excludes zero.
-
-**Phase 3: Structural exploration (~20%).** When mutation plateaus (3 consecutive non-improvements), change the approach: LLM → local model, single model → decomposed pipeline, expensive winner → distilled cheap version.
-
-**Phase 4: Finalize (~10%).** The harness re-scores the top candidates on val with extra repeats, then runs the **one-time test evaluation** and activates the winner. Val-vs-test gaps are reported per candidate; a candidate that collapses on test is demoted no matter its val rank.
-
-**Diversity via Pareto.** Don't keep only the global best. `prg.frontier()` tracks which candidate is best on *each train row*; a candidate that's worse on average but uniquely solves hard rows carries information. Mutation ancestors are sampled from the frontier, not just the leader — this is what keeps the search out of local optima.
