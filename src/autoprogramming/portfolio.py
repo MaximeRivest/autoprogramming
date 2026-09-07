@@ -10,10 +10,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass, field, replace
 from enum import IntEnum, StrEnum
 
 from .resources import Resources
+
+#: Reason recorded when a host plan covers a feasible tier by explicit decision
+#: rather than by an avenue. The ladder is a checklist for breadth, not a
+#: quota: every feasible tier must be attempted OR consciously skipped.
+UNCOVERED_TIER_REASON = "not proposed: the problem analysis did not justify this family"
 
 
 class ApproachTier(IntEnum):
@@ -74,6 +80,22 @@ class AvenueSpec:
     research_sources: tuple[str, ...] = ()
     deployment_notes: tuple[str, ...] = ()
     worker_model: str | None = None
+    # --- hypothesis contract -------------------------------------------
+    #: The cheapest experiment that could disprove the hypothesis. A proposal
+    #: that cannot say what would kill it is technology name-dropping.
+    falsifier: str = ""
+    #: Expected headline quality (metric units) and per-call cost, with the
+    #: planner's confidence in them. Recorded so allocation is an investment
+    #: decision the host can defend, and so predictions can be audited later.
+    expected_quality: float | None = None
+    expected_cost_dollars: float | None = None
+    confidence: float | None = None
+    #: Sub-problem ids (from the ProblemAnalysis) this avenue targets. Empty
+    #: means the whole task. Components that lose standalone can still be the
+    #: right piece of a system; targeting keeps them in the search.
+    targets: tuple[str, ...] = ()
+    #: A reasoned high-variance bet, deliberately kept alongside safer avenues.
+    long_shot: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tier", ApproachTier(int(self.tier)))
@@ -85,6 +107,17 @@ class AvenueSpec:
         object.__setattr__(self, "compose_from", tuple(self.compose_from))
         object.__setattr__(self, "research_sources", tuple(self.research_sources))
         object.__setattr__(self, "deployment_notes", tuple(self.deployment_notes))
+        object.__setattr__(self, "targets", tuple(self.targets))
+        for name in ("expected_quality", "expected_cost_dollars", "confidence"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, (int, float)) or not math.isfinite(value)
+            ):
+                raise ValueError(f"Avenue {self.id!r}: {name} must be a finite number or None.")
+        if self.confidence is not None and not 0.0 <= self.confidence <= 1.0:
+            raise ValueError(f"Avenue {self.id!r}: confidence must be within [0, 1].")
+        if self.expected_cost_dollars is not None and self.expected_cost_dollars < 0:
+            raise ValueError(f"Avenue {self.id!r}: expected_cost_dollars cannot be negative.")
         if self.allow_cross_tier_fallback and self.tier != ApproachTier.COMPOSITION:
             raise ValueError(
                 "Cross-tier fallback is reserved for an explicit composition avenue; "
@@ -121,10 +154,26 @@ class AvenueSpec:
                 "forbidden_substitutions", "allow_cross_tier_fallback",
                 "max_rounds", "wildcard", "compose_from",
                 "research_sources", "deployment_notes", "worker_model",
+                "falsifier", "expected_quality", "expected_cost_dollars",
+                "confidence", "targets", "long_shot",
             )
             if key in value
         }
         return cls(**accepted)
+
+    def require_hypothesis_contract(self) -> None:
+        """A host-authored avenue must say what would disprove it.
+
+        Library defaults and compositions are exempt: they are coverage
+        scaffolding, not claims. A plan authored by the strategist is a set of
+        bets, and a bet without a falsifier cannot be evaluated as one.
+        """
+        if len(self.falsifier.strip()) < 20:
+            raise ValueError(
+                f"Avenue {self.id!r} has no falsifier. State the cheapest "
+                "experiment that could disprove its hypothesis (>= 20 chars); "
+                "an idea that cannot say what would kill it is not a hypothesis."
+            )
 
 
 @dataclass
@@ -143,6 +192,9 @@ class AvenueState:
     blocker: dict | None = None
     human_retry_confirmed: bool = False
     failures: list[dict] = field(default_factory=list)
+    #: Alternative hypotheses a worker reported (ideas.md) without acting on
+    #: them. Host input for the next planning round; never auto-dispatched.
+    proposed_ideas: list[str] = field(default_factory=list)
 
     def begin_candidate(self, candidate: str) -> None:
         """Journal an imported candidate before evaluation starts."""
@@ -239,6 +291,7 @@ class AvenueState:
             blocker=(dict(value["blocker"]) if value.get("blocker") else None),
             human_retry_confirmed=bool(value.get("human_retry_confirmed", False)),
             failures=[dict(v) for v in value.get("failures", [])],
+            proposed_ideas=[str(v) for v in value.get("proposed_ideas", [])],
         )
 
     def to_dict(self) -> dict:
@@ -257,6 +310,7 @@ class AvenueState:
             "blocker": self.blocker,
             "human_retry_confirmed": self.human_retry_confirmed,
             "failures": [dict(v) for v in self.failures],
+            "proposed_ideas": list(self.proposed_ideas),
         }
 
 
@@ -270,8 +324,12 @@ class PortfolioPolicy:
     min_configs_before_abandon: int = 2
     stagnation_rounds: int = 2
     require_wildcard: bool = True
+    #: Train rows for the unpersisted smoke probe that gates full evaluation.
+    probe_rows: int = 8
 
     def __post_init__(self) -> None:
+        if self.probe_rows < 1:
+            raise ValueError("probe_rows must be at least 1.")
         total = self.breadth_fraction + self.deepening_fraction + self.composition_fraction
         if abs(total - 1.0) > 1e-9:
             raise ValueError(f"Portfolio budget fractions must sum to 1.0, got {total}.")
@@ -305,13 +363,13 @@ class Portfolio:
         exclusions = {int(k): str(v) for k, v in (exclusions or {}).items()}
         specs = list(specs)
         effective_policy = policy or PortfolioPolicy()
+        present = {int(s.tier) for s in specs}
+        for tier, fact in resources.feasibility().items():
+            if not fact["feasible"]:
+                exclusions.setdefault(tier, str(fact["reason"]))
+            elif fill_missing and tier not in present and tier != 8:
+                specs.append(default_avenue(ApproachTier(tier), resources))
         if fill_missing:
-            present = {int(s.tier) for s in specs}
-            for tier, fact in resources.feasibility().items():
-                if fact["feasible"] and tier not in present and tier != 8:
-                    specs.append(default_avenue(ApproachTier(tier), resources))
-                elif not fact["feasible"]:
-                    exclusions.setdefault(tier, str(fact["reason"]))
             has_pi_experiment = any(
                 any(
                     capability.startswith("pi-model:")
@@ -357,22 +415,29 @@ class Portfolio:
                     ),
                     worker_model=resources.search.pi_models[0],
                 ))
-            if effective_policy.require_wildcard and not any(s.wildcard for s in specs):
-                specs.append(AvenueSpec(
-                    id="wildcard",
-                    tier=ApproachTier.CODE_AND_RULES,
-                    title="Non-obvious wildcard",
-                    hypothesis=(
-                        "A task-specific mechanism outside the obvious baselines "
-                        "may expose a missed quality/cost region."
-                    ),
-                    implementation_brief=(
-                        "Invent one non-obvious algorithmic or hybrid mechanism "
-                        "that is materially different from the other assigned avenues."
-                    ),
-                    mechanism="task-specific wildcard mechanism unlike the planned families",
-                    wildcard=True,
-                ))
+        # The reserved high-variance bet is policy, not padding: a host plan
+        # satisfies it with any reasoned long shot; otherwise the library's
+        # generic wildcard stands in regardless of fill_missing, because a
+        # portfolio without one could never satisfy may_finalize.
+        if effective_policy.require_wildcard and not any(
+            s.wildcard or s.long_shot for s in specs
+        ):
+            specs.append(AvenueSpec(
+                id="wildcard",
+                tier=ApproachTier.CODE_AND_RULES,
+                title="Non-obvious wildcard",
+                hypothesis=(
+                    "A task-specific mechanism outside the obvious baselines "
+                    "may expose a missed quality/cost region."
+                ),
+                implementation_brief=(
+                    "Invent one non-obvious algorithmic or hybrid mechanism "
+                    "that is materially different from the other assigned avenues."
+                ),
+                mechanism="task-specific wildcard mechanism unlike the planned families",
+                wildcard=True,
+                long_shot=True,
+            ))
         specs = [ensure_avenue_contract(spec, resources) for spec in specs]
         result = cls(
             resources=resources,
@@ -400,6 +465,14 @@ class Portfolio:
         return cls.from_dict(json.loads(Path(path).read_text()))
 
     def validate(self) -> None:
+        """A defensible plan: unique ids, distinct mechanisms, every tier decided.
+
+        The ladder is a breadth checklist, not a quota. A feasible tier must be
+        either represented by an avenue or listed in ``exclusions`` with a
+        reason; what is refused is silence about a family, not its absence.
+        Two materially different mechanisms are the floor for calling this a
+        search rather than a single bet.
+        """
         ids = [a.spec.id for a in self.avenues]
         if len(ids) != len(set(ids)):
             raise ValueError("Portfolio avenue ids must be unique.")
@@ -415,18 +488,27 @@ class Portfolio:
 
         feasibility = self.resources.feasibility()
         represented = {int(a.spec.tier) for a in self.avenues}
-        missing = [
+        undecided = [
             tier for tier, info in feasibility.items()
-            if tier <= 7 and info["feasible"] and tier not in represented
+            if tier <= 7 and tier not in represented and tier not in self.exclusions
         ]
-        if missing:
-            raise ValueError(f"Portfolio omitted feasible approach tiers: {missing}.")
-        unexplained = [
-            tier for tier, info in feasibility.items()
-            if tier <= 7 and not info["feasible"] and tier not in self.exclusions
-        ]
-        if unexplained:
-            raise ValueError(f"Portfolio exclusions need reasons for tiers: {unexplained}.")
+        if undecided:
+            labels = {t: TIER_LABELS[ApproachTier(t)] for t in undecided}
+            raise ValueError(
+                f"Portfolio leaves approach families undecided: {labels}. Each "
+                "feasible family must be attempted by an avenue or consciously "
+                "skipped with a reason in exclusions={tier: reason}. Silence about "
+                "a family is what breadth-first search forbids; skipping it for a "
+                "stated reason is a decision the human can review."
+            )
+        distinct = {a.spec.fingerprint for a in self.avenues}
+        if len(distinct) < 2 and not any(
+            a.spec.tier == ApproachTier.COMPOSITION for a in self.avenues
+        ):
+            raise ValueError(
+                "Portfolio has fewer than two materially different mechanisms; "
+                "a single bet is not a search. Add an independent hypothesis."
+            )
 
     @staticmethod
     def _conclusive(avenue: AvenueState) -> bool:
@@ -465,7 +547,7 @@ class Portfolio:
         if not self.breadth_complete:
             return False
         if self.policy.require_wildcard:
-            wildcards = [a for a in self.avenues if a.spec.wildcard]
+            wildcards = [a for a in self.avenues if a.spec.wildcard or a.spec.long_shot]
             if not wildcards or not any(self._conclusive(a) for a in wildcards):
                 return False
         successful = [

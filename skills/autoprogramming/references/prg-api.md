@@ -46,7 +46,20 @@ prg.data          # SplitView(train=<n>, val=<n>)
 
 When optimization starts from a live Pi conversation, that human-facing session
 is the sole strategy orchestrator. The library does not launch another strategy
-process. After metric approval, the current agent performs and records research:
+process. After metric approval, the current agent records what the problem is:
+
+```py
+prg.analyze_problem(*, structure, knowledge, data_regime, generalization,
+                    evidence, sub_problems=(), hard_cases="",
+                    analyzed_by="host") -> dict
+prg.problem_analysis -> dict | None
+```
+
+Each of the five required answers must be a real answer (>= 40 characters);
+`sub_problems` is a list of `ap.SubProblem(id, description, needs="")` naming
+parts of the task an avenue may `target`. Persisted at
+`.ap/controller/analysis.json`; planning without it raises
+`ProblemAnalysisError`. Then the agent performs and records research:
 
 ```py
 prg.web_search(query: str, *, limit: int = 6) -> SearchReport
@@ -59,12 +72,20 @@ Planning before that gate raises `WebResearchError`:
 
 ```py
 prg.plan_portfolio(
-    specs: list[ap.AvenueSpec | dict], *, exclusions=None, policy=None
+    specs: list[ap.AvenueSpec | dict], *, exclusions=None, policy=None,
+    fill_missing=False,
 ) -> dict
 ```
 
-The host-authored plan is validated/fill-completed by the deterministic breadth
-policy. Then drive one controller phase at a time:
+The plan is a set of bets. Every host avenue must carry a `falsifier` (>= 20
+chars) and may carry `expected_quality`, `expected_cost_dollars`,
+`confidence` (0–1), `targets` (analysis sub-problem ids), and `long_shot`.
+Validation refuses: an avenue without a falsifier; a target the analysis does
+not name; a feasible tier that is neither represented nor listed in
+`exclusions={tier: reason}` ("undecided"); fewer than two materially different
+mechanisms. A reasoned `long_shot` satisfies the wildcard policy; otherwise the
+library adds its generic wildcard. Generic per-tier padding happens only with
+`fill_missing=True`. Then drive one controller phase at a time:
 
 ```py
 prg.orchestrate_portfolio("breadth", budget=ap.Budget(dollars=20))
@@ -99,6 +120,20 @@ the authenticated host, so OAuth credentials are never copied remotely.
 GPU-heavy avenues are admitted under a per-target concurrency/VRAM lease (one
 concurrent GPU job by default). Remote compute is optional and is never inferred
 or hard-coded by the skill.
+
+## Smoke test: `probe`
+
+```py
+prg.probe(candidate, n_rows=8) -> ProbeReport
+```
+
+Runs the first `n_rows` train rows once each and returns `mean` (primary
+metric), `errors`, `cost_dollars`, and `all_failed`. **Nothing is persisted**:
+a probe is the staged-commitment step before a full repeated evaluation, not a
+score. Charges the budget for what it runs; train-only by construction. The
+controller probes every worker implementation (`PortfolioPolicy.probe_rows`)
+and routes an all-failed probe straight to diagnosis/repair without spending on
+train+val.
 
 ## Metric first: `propose_metric`
 

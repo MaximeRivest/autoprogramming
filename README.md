@@ -58,7 +58,7 @@ translate("Hello, how are you?")
 
 The Pi model already speaking with the human is the strategy orchestrator, not a candidate author. In a live Pi session AutoProgramming uses `HostOrchestratorBackend` and never starts a second strategy process; this preserves the user's requirements, research, and failure reasoning in one conversation. A trusted Python controller launches only isolated implementation workers and independent auditors. Workers receive a generic function contract, development examples, their assigned mechanism, and their own files—never optimizer context, metric code or weights, scores, other workers, val, or test.
 
-Before planning, the host runs and records current web searches. It then plans across runtime agents, model graphs, single calls, fine-tunes, specialized models, classical ML, and direct code/rules. Mechanisms are hard contracts, but engineering plans are adaptable: workers may change package/model variants within the family, batching, parsing, device placement, and setup. A broken worker, malformed output, noncompliant fallback, or suspicious zero result does not satisfy breadth. The controller investigates, repairs, and requests a materially independent configuration; ambiguity pauses for the human.
+Planning is analysis-first and falsifiable. Before naming any technology, the host records what the problem *is* (`prg.analyze_problem`: structure, available knowledge, data regime, what must generalize, what evidence would separate a real solution from an imitation, hard cases, sub-problems), then runs and records current web searches. Only then does it plan — as a set of bets, each with a hypothesis, the cheapest experiment that could disprove it, and expected quality/cost. The analysis is what points to mechanisms: differential equations, simulation, causal models, retrieval, feature engineering, or plain code are as legal as a model call. The ladder of runtime agents, model graphs, single calls, fine-tunes, specialized models, classical ML, and direct code/rules is a breadth checklist: every feasible family is attempted or consciously skipped with a reason, and the library no longer pads a plan with generic per-tier avenues. Mechanisms are hard contracts, but engineering plans are adaptable: workers may change package/model variants within the family, batching, parsing, device placement, and setup. Spending is staged: every implementation is smoke-probed on a few train rows before a full repeated evaluation is paid for. A broken worker, malformed output, noncompliant fallback, or suspicious zero result does not satisfy breadth. The controller investigates, repairs, and requests a materially independent configuration; ambiguity pauses for the human. Workers that see a better approach write it to `ideas.md` instead of building it; the host reads those as `proposed_ideas` and may open them as new avenues — fidelity holds inside an experiment, freedom lives between experiments.
 
 Search is breadth-first by policy: every feasible family must produce evaluated faithful evidence or be explicitly excluded by the human, each successful family gets a second independent pass, and only then does the host allocate deeper rounds and cross-tier composition. See [`docs/orchestrated-search.md`](docs/orchestrated-search.md).
 
@@ -87,9 +87,11 @@ prepared = translate.prepare(
 )
 prg = ap.attach(prepared.workspace.root)
 # The current Pi session proposes/demonstrates the metric suite and obtains sign-off.
+prg.analyze_problem(structure=..., knowledge=..., data_regime=..., generalization=...,
+                    evidence=..., sub_problems=[ap.SubProblem("terms", "glossary lookup")])
 print(prg.web_search("latest efficient approaches for <abstract task>"))
 print(prg.web_search("2026 open source <task> benchmark models"))
-prg.plan_portfolio(web_informed_avenue_specs)
+prg.plan_portfolio(falsifiable_avenue_specs, exclusions={4: "no fine-tuning access"})
 prg.orchestrate_portfolio("breadth", budget=ap.Budget(dollars=20))
 state = prg.portfolio_status()
 prg.orchestrate_portfolio("deepen", avenue_ids=[...])
@@ -282,8 +284,10 @@ Inside the optimization loop, the agent holds `prg` — the agent-side handle to
 
 ```py
 prg.schema                                   # inspect inputs/outputs & docstrings
+prg.analyze_problem(...)                     # what the problem IS — first planning gate
 prg.web_search("latest ...")                 # host research; run 2+ before planning
-prg.plan_portfolio([...])                    # authored by the current Pi session
+prg.plan_portfolio([...], exclusions={...})  # falsifiable bets authored by this session
+prg.probe("candidate_0")                     # cheap unpersisted smoke test on train rows
 prg.orchestrate_portfolio("breadth")         # controller launches workers, not strategy
 prg.portfolio_status()                       # audits/failures/objectives for host review
 prg.eval("candidate_0")                      # manual/legacy val scoring

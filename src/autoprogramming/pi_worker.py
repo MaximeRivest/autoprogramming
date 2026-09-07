@@ -59,6 +59,12 @@ directory as `artifact_namespace` under `[tool.ap]`; resolve it as
 `Path(__file__).parents[1] / "artifacts" / <namespace>`. If a call spends money,
 report AP_COST_DOLLARS after each prediction. Finish only after checking that no
 error branch substitutes a different mechanism and syntax-checking solution.py.
+
+If, while working, you see a materially different approach that you believe
+would serve this task better, do NOT build it. Write it to ideas.md in this
+directory: the hypothesis, why the examples suggest it, and the cheapest test
+that could disprove it. The planner reads ideas.md and may open it as its own
+experiment. Fidelity holds inside your task; new ideas travel through ideas.md.
 """
 
 
@@ -425,6 +431,15 @@ not evidence that this capability is unavailable. Report Pi usage cost from its
 JSON events and load the Pi process lazily. The controller evaluates this
 network-bound point beside the authenticated host even when heavy compute is
 staged remotely; it never copies OAuth credentials to the compute target.
+
+## Hypothesis under test
+{spec.hypothesis}
+What would disprove it: {spec.falsifier or 'not stated'}
+{('Targets these parts of the task: ' + ', '.join(spec.targets)) if spec.targets else 'Targets the whole task.'}
+
+Your job is to give this hypothesis a fair test, not to make the function work
+by any means. If you notice a better approach, record it in ideas.md instead of
+building it.
 
 ## Runtime artifact namespace
 If runtime files are needed, use `artifacts/{spec.id}/` here and declare

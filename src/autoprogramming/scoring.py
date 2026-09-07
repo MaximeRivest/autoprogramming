@@ -987,6 +987,94 @@ def evaluate(
     )
 
 
+@dataclass
+class ProbeReport:
+    """A cheap smoke test on a few train rows: does the mechanism run at all?
+
+    Nothing is persisted — a probe is not a score, it is the staged-commitment
+    step that decides whether a full (train + val, repeated) evaluation is
+    worth its budget. ``mean`` is the primary metric over the probed rows.
+    """
+
+    candidate: str
+    n_rows: int
+    mean: float
+    errors: list[str]
+    cost_dollars: float
+
+    @property
+    def all_failed(self) -> bool:
+        return self.n_rows > 0 and len(self.errors) >= self.n_rows
+
+    def __str__(self) -> str:
+        status = "all runs failed" if self.all_failed else f"mean {self.mean:.3f}"
+        return (
+            f"probe {self.candidate}: {status} on {self.n_rows} train rows "
+            f"(${self.cost_dollars:.4g}, {len(self.errors)} errors)"
+        )
+
+
+def probe(workspace, candidate_name: str, n_rows: int = 8) -> ProbeReport:
+    """Run a candidate on the first ``n_rows`` train rows, once each, unpersisted.
+
+    Explore a lot for a little: an implementation that cannot run on eight
+    rows should not be charged a full repeated evaluation to find that out.
+    Charges the budget for what it runs; refuses on an exhausted ledger like
+    any run. Train-only by construction, so the data discipline is untouched.
+    """
+    if n_rows < 1:
+        raise ValueError(f"probe n_rows must be at least 1, got {n_rows!r}.")
+    metric.ensure_approved(workspace)
+    metric_fn = metric.load_metric(workspace)
+    weights = _approval_weights(workspace)
+    candidate = _sibling("candidates").load_candidate(workspace, candidate_name)
+    rows = _sibling("data").load_split(workspace, "train")[:n_rows]
+    runner_mod = _sibling("runner")
+    ledger = BudgetLedger(workspace.budget_json)
+    schema = workspace.schema
+
+    session_factory = getattr(runner_mod, "candidate_session", None)
+    session_cls = getattr(runner_mod, "CandidateSession", None)
+    session_context = (
+        session_factory(workspace, candidate)
+        if session_factory is not None
+        else session_cls(workspace, candidate)
+        if session_cls is not None
+        else contextlib.nullcontext(None)
+    )
+    scores: list[float] = []
+    errors: list[str] = []
+    spent = 0.0
+    with session_context as candidate_session:
+        run_one = (
+            candidate_session.run
+            if candidate_session is not None
+            else lambda inputs: runner_mod.run_candidate(workspace, candidate, inputs)
+        )
+        for i, row in enumerate(rows):
+            ledger.check()
+            run = run_one(schema.coerce_inputs(row))
+            cost = getattr(run, "cost_dollars", None) or 0.0
+            spent += cost
+            ledger.charge(eval_calls=1, dollars=cost, category="candidate")
+            if run.ok:
+                score, _ = metric.score_pair(
+                    metric_fn, schema, run.outputs, schema.coerce_expected(row), weights
+                )
+                scores.append(float(score))
+            else:
+                lines = (getattr(run, "error", None) or "candidate failed").strip().splitlines()
+                errors.append(f"row_{i}: {lines[-1] if lines else 'candidate failed'}")
+                scores.append(0.0)
+    return ProbeReport(
+        candidate=candidate.name,
+        n_rows=len(rows),
+        mean=fmean(scores) if scores else 0.0,
+        errors=errors,
+        cost_dollars=spent,
+    )
+
+
 def _row_index(row_id: str) -> int:
     try:
         return int(row_id.rsplit("_", 1)[1])

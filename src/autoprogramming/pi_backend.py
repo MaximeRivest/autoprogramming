@@ -354,6 +354,35 @@ def _complete_environment_failure(report) -> list[str]:
     return details[:8]
 
 
+class _ProbeFailed(Exception):
+    """Internal: the smoke probe failed on every row; skip the full evaluation."""
+
+
+_IDEAS_FILE = "ideas.md"
+
+
+def _collect_worker_ideas(state, root: Path) -> None:
+    """Surface a worker's alternative hypotheses without letting it act on them.
+
+    Fidelity holds inside an experiment; freedom lives between experiments.
+    A worker that sees a better approach writes it to ideas.md, the
+    controller records it on the avenue, and the host decides whether it
+    becomes a new avenue. Silent substitution stays forbidden.
+    """
+    path = root / _IDEAS_FILE
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    if not text:
+        return
+    text = text[:4000]
+    if text not in state.proposed_ideas:
+        state.proposed_ideas.append(text)
+
+
 class PiOrchestratorBackend:
     """Breadth-first optimizer driven by one Pi orchestrator and Pi workers."""
 
@@ -614,6 +643,7 @@ class PiOrchestratorBackend:
             result, sandbox = item
             results[spec.id] = (result, sandbox)
             state.status = AvenueStatus.READY
+            _collect_worker_ideas(state, sandbox)
             if result.stderr.strip():
                 state.notes.append(result.stderr.strip()[-1000:])
         portfolio.write(portfolio_path)
@@ -1190,6 +1220,17 @@ test what is possible, syntax-check it, and never add a cross-family fallback.""
                         f"Candidate journal expected {expected_name}, got {cand.name}."
                     )
                 with admission.lease(state.spec, exclusive=(attempt > 0)):
+                    # Staged commitment: a handful of unpersisted train rows
+                    # decides whether the full repeated evaluation is worth
+                    # its budget. A mechanism that cannot run eight rows is
+                    # diagnosed here for cents, not after train+val.
+                    smoke = harness.probe(
+                        cand.name, n_rows=portfolio.policy.probe_rows
+                    )
+                    state.notes.append(str(smoke))
+                    if smoke.all_failed:
+                        failure_details = list(smoke.errors[:12])
+                        raise _ProbeFailed()
                     train = harness.eval(
                         cand.name, split="train", per_instance=True
                     )
@@ -1247,6 +1288,8 @@ test what is possible, syntax-check it, and never add a cross-family fallback.""
             except BudgetExceededError:
                 portfolio.write(portfolio_path)
                 raise
+            except _ProbeFailed:
+                pass  # failure_details already carries the probe errors
             except Exception as exc:
                 failure_details = [str(exc)]
 
@@ -1502,6 +1545,7 @@ Portfolio state (aggregate vectors only):\n{json.dumps(portfolio.to_dict(), defa
                 _result, source = repaired
             else:
                 source = solution.read_text(encoding="utf-8")
+            _collect_worker_ideas(avenue, root)
             try:
                 source = self._ensure_adherent_solution(
                     harness, avenue, resources,
@@ -1813,15 +1857,36 @@ keys in the corrected METRICS mapping. Task schema:\n{harness.schema.describe()}
     def _create_portfolio(self, harness, resources: Resources) -> Portfolio:
         BudgetLedger(harness.workspace.budget_json).check()
         feasibility = resources.feasibility()
-        prompt = f"""Before designing the portfolio, use web_search at least twice
-with different task-specific queries and inspect current sources for modern
-models, algorithms, libraries, and compound systems. Do not include private
-examples in queries. Then design a diverse task-specific implementation
-portfolio across EVERY feasible tier in the supplied feasibility map. Each
-avenue must use a materially distinct mechanism and cite source URLs in
-`research_sources`. Do not write code. Return JSON:
-{{"avenues": [{{"id":"...", "tier":1, "title":"...",
-"hypothesis":"...", "implementation_brief":"...", "mechanism":"...",
+        prompt = f"""First analyze the problem, before choosing any technology:
+what structure it has (language, geometry, dynamics, causality, constraints);
+what knowledge exists beyond the examples (laws, domain expertise, simulators,
+references); the data regime (rich/scarce, clean/noisy, what labels measure);
+what must generalize; what evidence would separate a real solution from a
+convincing imitation; which inputs are genuinely hard; and the sub-problems the
+task decomposes into. Let that analysis point to mechanisms — it may justify
+differential equations, simulation, causal models, retrieval, feature
+engineering, or plain code as readily as a model call.
+
+Then use web_search at least twice with different task-specific queries and
+inspect current sources. Do not include private examples in queries.
+
+Then design the portfolio as a set of BETS, not a quota. The tier list is a
+breadth checklist: every feasible tier must be attempted by an avenue or
+consciously skipped with a reason in `exclusions`. Prefer avenues the analysis
+justifies; include at least one reasoned long shot. Avenues may target a
+sub-problem rather than the whole task — a component that loses standalone can
+be the right piece of a compound system. Each avenue needs a hypothesis, the
+cheapest experiment that could disprove it (`falsifier`), and expected
+quality/cost with your confidence, so allocation is an investment decision.
+Each avenue must use a materially distinct mechanism and cite source URLs.
+Do not write code. Return JSON:
+{{"analysis": {{"structure":"...", "knowledge":"...", "data_regime":"...",
+"generalization":"...", "evidence":"...", "hard_cases":"...",
+"sub_problems":[{{"id":"...", "description":"...", "needs":"..."}}]}},
+"avenues": [{{"id":"...", "tier":1, "title":"...",
+"hypothesis":"...", "falsifier":"...", "expected_quality":0.0,
+"expected_cost_dollars":0.0, "confidence":0.0, "targets":["sub-problem id"],
+"long_shot":false, "implementation_brief":"...", "mechanism":"...",
 "runtime_requirements":[], "allowed_api_providers":[],
 "required_capabilities":[], "required_mechanisms":["non-negotiable evidence"],
 "forbidden_substitutions":["specific cross-family fallback"], "max_rounds":3,
@@ -1872,6 +1937,21 @@ Schema:\n{harness.schema.describe()}\nResources:\n{json.dumps(resources.to_dict(
             except WebResearchError as exc:
                 raise RunnerError(str(exc)) from exc
             value = _json_object(result.text)
+            from .analysis import ProblemAnalysis, ProblemAnalysisError, record_analysis
+
+            try:
+                analysis = ProblemAnalysis.from_dict(
+                    dict(value.get("analysis") or {}), 
+                )
+            except (ProblemAnalysisError, TypeError) as exc:
+                raise RunnerError(
+                    "Pi portfolio planning did not include a usable problem "
+                    f"analysis ({exc}). Planning from a tier list alone was "
+                    "refused; the analysis is what should point the search at "
+                    "mechanisms worth trying."
+                ) from exc
+            analysis = ProblemAnalysis.from_dict({**analysis.to_dict(), "analyzed_by": "pi-orchestrator"})
+            record_analysis(harness.workspace, analysis)
             research_urls = [
                 str(source.get("url"))
                 for search in research

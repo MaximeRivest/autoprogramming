@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Made planning analysis-first: `prg.analyze_problem` records the problem's
+  structure, available knowledge, data regime, generalization target, evidence
+  standard, hard cases, and sub-problems, and `plan_portfolio` refuses without it
+  (headless planning must return the same analysis).
+- Turned avenues into falsifiable bets: `AvenueSpec` gains `falsifier`,
+  `expected_quality`, `expected_cost_dollars`, `confidence`, `targets`
+  (sub-problem ids), and `long_shot`; host-authored avenues without a falsifier
+  are refused, and a reasoned long shot satisfies the wildcard policy.
+- Made the approach ladder a breadth checklist instead of a quota: a feasible
+  tier must be attempted or skipped with a stated reason, a plan needs at least
+  two materially different mechanisms, and generic per-tier padding is opt-in
+  (`fill_missing=True`) rather than automatic.
+- Added staged spending: `prg.probe` smoke-tests a candidate on a few train rows
+  without persisting scores, and the controller probes every implementation
+  before paying for a full repeated evaluation.
+- Let workers report alternative hypotheses in `ideas.md`; the controller records
+  them as `proposed_ideas` for the host to plan, never substituting them.
+- Fixed `prg.web_search` reading a nonexistent `dev` split (it now screens the
+  query against train rows).
 - Bounded PEP 723 evaluation environments with stable dependency-keyed drivers,
   moved worker and remote-evaluation UV data into run-owned caches, and added
   guarded cache-only cleanup that preserves all candidate diagnostics.

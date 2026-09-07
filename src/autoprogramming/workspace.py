@@ -400,6 +400,11 @@ class Workspace:
         return self.root / ".ap" / "controller" / "research.json"
 
     @property
+    def analysis_json(self) -> Path:
+        """Host-recorded problem analysis; required before portfolio planning."""
+        return self.root / ".ap" / "controller" / "analysis.json"
+
+    @property
     def portfolio_json(self) -> Path:
         """Controller-owned portfolio state (development-time only)."""
         return self.root / ".ap" / "controller" / "portfolio.json"

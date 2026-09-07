@@ -81,9 +81,21 @@ def test_keyless_web_search_parses_titles_urls_and_snippets(monkeypatch):
     )
 
 
-def test_portfolio_plan_requires_two_recorded_web_searches(tmp_path):
+ANALYSIS = dict(
+    structure="short free text mapped onto a small closed label set; no dynamics",
+    knowledge="label definitions are known in prose; no simulator or reference corpus",
+    data_regime="tiny and clean; labels are unambiguous for these examples",
+    generalization="must hold on unseen phrasings of the same intents",
+    evidence="held-out accuracy plus inspection of confusions between labels",
+)
+
+
+def test_portfolio_plan_requires_analysis_then_two_recorded_web_searches(tmp_path):
     ws = workspace(tmp_path)
     harness = AgentHarness(ws)
+    with pytest.raises(ap.ProblemAnalysisError, match="analyze_problem"):
+        harness.plan_portfolio([])
+    harness.analyze_problem(**ANALYSIS)
     with pytest.raises(WebResearchError, match="two|need 2"):
         harness.plan_portfolio([])
 
@@ -98,8 +110,19 @@ def test_portfolio_plan_requires_two_recorded_web_searches(tmp_path):
         ))
     evidence = ensure_researched(ws)
     assert len(evidence["searches"]) == 2
-    plan = harness.plan_portfolio([])
-    assert plan["avenues"]
+    # An empty plan is no longer padded with generic per-tier avenues; only
+    # the library's long-shot wildcard is added, and one bet is not a search.
+    with pytest.raises(ValueError, match="fewer than two"):
+        harness.plan_portfolio([])
+    rules = ap.AvenueSpec(
+        id="keyword-rules", tier=ap.ApproachTier.CODE_AND_RULES,
+        title="Keyword rules", hypothesis="Labels are separable by a few cue words.",
+        implementation_brief="Match generalized cue patterns per label.",
+        mechanism="cue-word rule table",
+        falsifier="if unseen phrasings share no cue words, accuracy collapses",
+    )
+    plan = harness.plan_portfolio([rules])
+    assert [a["spec"]["id"] for a in plan["avenues"]] == ["keyword-rules", "wildcard"]
     assert all(
         avenue["spec"]["research_sources"]
         for avenue in plan["avenues"]

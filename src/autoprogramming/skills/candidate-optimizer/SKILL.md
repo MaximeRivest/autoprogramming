@@ -17,16 +17,28 @@ code/names/weights, scores, other candidates, val, or test. They know only their
 function contract, dev-fit examples, assigned mechanism, resource envelope, and
 their own prior files.
 
-Before planning, call `prg.web_search(...)` at least twice with task-specific,
-non-private queries and inspect current sources. Submit the resulting
-`ap.AvenueSpec` list through `prg.plan_portfolio(...)`, dispatch with
-`prg.orchestrate_portfolio("breadth")`, inspect `prg.portfolio_status()`, then
-choose deepen/compose phases in this same conversation.
+Planning has three gates, enforced by `prg.plan_portfolio(...)`:
+
+1. **Analyze the problem first** — `prg.analyze_problem(...)` (see below).
+   What the problem IS points to mechanisms; a tier list does not.
+2. **Research current sources** — `prg.web_search(...)` at least twice with
+   task-specific, non-private queries; inspect and cite them.
+3. **Submit falsifiable bets** — a list of `ap.AvenueSpec`, each with a
+   hypothesis, a `falsifier` (the cheapest experiment that could disprove it),
+   expected quality/cost with your confidence, optional sub-problem `targets`,
+   and at least one reasoned `long_shot`.
+
+Then dispatch with `prg.orchestrate_portfolio("breadth")`, inspect
+`prg.portfolio_status()` (including each avenue's `proposed_ideas` — alternative
+hypotheses workers reported without acting on them), and choose deepen/compose
+phases in this same conversation. A good worker idea becomes a NEW avenue you
+plan; it is never substituted silently.
 
 Do not finalize merely because one avenue is acceptable. Controller policy
-requires every resource-feasible tier to be attempted or explicitly excluded,
-a second configuration per successful family, then a score-informed deepening
-and cross-tier composition round. Metric suites separate user-approved
+requires every resource-feasible approach family to be attempted or consciously
+skipped with a stated reason (`exclusions={tier: reason}`), at least two
+materially different mechanisms, a second configuration per successful family,
+then a score-informed deepening and cross-tier composition round. Metric suites separate user-approved
 acceptance lenses from search-only diagnostics; approach novelty is a portfolio
 gate, not a quality metric.
 
@@ -89,8 +101,13 @@ Read per-workspace facts live from the workspace, not from memory:
     prg.data.val                                 # len() only — val rows are never readable
     prg.budget                                   # remaining dollars / eval_calls / minutes
     prg.propose_metric(code, examples, primary=..)  # metric sign-off — FIRST, before any eval
+    prg.analyze_problem(structure=.., knowledge=.., data_regime=.., generalization=..,
+                        evidence=.., sub_problems=[ap.SubProblem(id, description)])
+                                                 # what the problem IS — FIRST gate
     prg.web_search(query)                        # current sources; run 2+ before planning
-    prg.plan_portfolio(specs)                    # plan authored by THIS Pi session
+    prg.plan_portfolio(specs, exclusions={tier: reason})
+                                                 # falsifiable bets authored by THIS session
+    prg.probe("candidate_1", n_rows=8)           # cheap smoke test, unpersisted, train only
     prg.orchestrate_portfolio("breadth", budget=ap.Budget(dollars=20))
                                                    # trusted controller + isolated workers
     prg.portfolio_status()                       # source/audits/failures/objectives
@@ -107,7 +124,53 @@ Read per-workspace facts live from the workspace, not from memory:
     prg.resolve_blocker(id, "retry", confirmed_by="user")  # after human check
     prg.finalize()                               # suite policy chooses finalists — LAST
 
-## Survey the approach ladder before you commit
+## Analyze the problem before choosing technology
+
+With capable coding agents, implementation is cheap; choosing experiments is
+the scarce resource. Before naming any mechanism, answer — and record with
+`prg.analyze_problem(...)` —:
+
+- **structure** — language, geometry, dynamics, causality, constraints?
+- **knowledge** — what exists beyond the examples: laws, domain expertise,
+  simulators, reference corpora, a glossary?
+- **data_regime** — rich or scarce, clean or noisy; what the labels measure.
+- **generalization** — new inputs, new populations, future conditions,
+  interventions? (Predicting observations and predicting the effect of an
+  intervention need different evidence, not merely different libraries.)
+- **evidence** — what would separate a real solution from a convincing
+  imitation?
+- **hard_cases** and **sub_problems** — which inputs are genuinely difficult,
+  and which parts of the task may deserve their own mechanism.
+
+Let the answers point to mechanisms. A dynamics problem may justify a
+differential-equation or hybrid model; a causal question a structural model; a
+rich-simulator setting an agent-based or optimization approach; a scarce-data
+problem priors and pretrained models; an exact-rule domain plain code. None of
+these need to be on a list to be legal — a candidate is any Python `predict()`.
+
+Search across dimensions, not just tiers: **representation** (text, features,
+embeddings, graphs, equations, latent states), **mechanism** (rules,
+optimization, statistics, deep learning, simulation, retrieval, model
+reasoning), **architecture** (single component, pipeline, feedback loop, router,
+ensemble, hybrid), **adaptation** (prompt tuning, feature selection, fitting,
+fine-tuning). Explore promising intersections; do not enumerate combinations.
+
+## Every avenue is a bet with a falsifier
+
+State, for each avenue: *this should work because the problem has structure X;
+it needs evidence Y; the cheapest experiment that could disprove it is Z;
+expected quality/cost and confidence.* An idea that cannot say what would kill
+it is technology name-dropping, and `plan_portfolio` refuses it. Keep one
+reasoned long shot. Avenues may target a sub-problem — a component that loses
+standalone can be the right piece of a compound system.
+
+Spend in stages. The controller smoke-probes every implementation on a few
+train rows (`prg.probe`) before paying for a full repeated evaluation, and you
+should reason the same way: many ideas cost tokens, probes cost minutes, full
+builds cost hours and money, composition and ablation come last. Promotion is
+earned by evidence, not by category coverage.
+
+## The approach ladder is a breadth checklist
 
 A candidate is any Python that satisfies the schema, so the search space spans a
 whole cost/capability spectrum. From most expensive/capable to cheapest:
@@ -120,12 +183,15 @@ whole cost/capability spectrum. From most expensive/capable to cheapest:
 6. Classical ML (a fitted scikit-learn head, gradient boosting, nearest neighbor).
 7. Hand-written features, rules, regex, or lookup logic.
 
-Rules to follow, not options:
+Use it to check you have not forgotten a family, not as a quota. Every feasible
+tier must be attempted or skipped with a reason; the library no longer pads a
+plan with generic per-tier avenues (pass `fill_missing=True` only if you truly
+want that). Rules to follow, not options:
 
 - **Breadth before depth.** Do NOT seed one candidate and mutate it forever —
   that single-step trap wastes budget refining a local idea while the winning
   family goes untried. First seed a PORTFOLIO of genuinely distinct candidates
-  spanning several tiers (e.g. a model call, a classical head, a rules baseline,
+  the analysis justifies (e.g. a model call, a classical head, a rules baseline,
   a pretrained-model pipeline) and baseline all of them. THEN deepen the ones the
   data rewards.
 - **Compose across tiers.** The best solution is usually a compound system, not a

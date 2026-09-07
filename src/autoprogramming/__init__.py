@@ -5,6 +5,7 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
 
+from .analysis import ProblemAnalysis, ProblemAnalysisError, SubProblem
 from .budget import Budget
 from .errors import (
     AutoProgrammingError,
@@ -62,6 +63,9 @@ __all__ = [
     "ApproachTier",
     "AvenueSpec",
     "PortfolioPolicy",
+    "ProblemAnalysis",
+    "ProblemAnalysisError",
+    "SubProblem",
     "PiOrchestratorBackend",
     "HostOrchestratorBackend",
     "SearchReport",

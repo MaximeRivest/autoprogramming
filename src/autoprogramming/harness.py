@@ -232,6 +232,15 @@ class AgentHarness:
             per_instance=per_instance, n_repeats=n_repeats,
         )
 
+    def probe(self, candidate, n_rows: int = 8):
+        """Smoke-test a candidate on a few train rows before paying for a full eval.
+
+        Unpersisted and train-only: it decides whether an implementation runs
+        at all, so a broken build is diagnosed for cents instead of after a
+        repeated train+val evaluation.
+        """
+        return scoring.probe(self._workspace, candidate, n_rows=n_rows)
+
     def run(self, candidate, split: str = "train", row: int = 0) -> TracedRun:
         """One traced run of a single train row — the reflection primitive."""
         guards.assert_trace_allowed(split)
@@ -405,7 +414,7 @@ class AgentHarness:
             )
         normalized_query = str(query).casefold()
         # Research should describe the task, not publish demonstration rows.
-        for row in data_mod.load_split(self._workspace, "dev"):
+        for row in data_mod.load_split(self._workspace, "train"):
             for value in row.values():
                 text = str(value).strip()
                 if len(text) >= 16 and text.casefold() in normalized_query:
@@ -417,14 +426,72 @@ class AgentHarness:
         record_report(self._workspace, report)
         return report
 
-    def plan_portfolio(self, specs, *, exclusions=None, policy=None):
-        """Record a web-informed plan authored by this current Pi session."""
+    def analyze_problem(
+        self,
+        *,
+        structure: str,
+        knowledge: str,
+        data_regime: str,
+        generalization: str,
+        evidence: str,
+        sub_problems=(),
+        hard_cases: str = "",
+        analyzed_by: str = "host",
+    ):
+        """Record what the problem IS before any approach is chosen.
+
+        This is the gate ``plan_portfolio`` enforces alongside web research.
+        The answers are what should point the search toward mechanisms — a
+        physics problem toward differential equations, a scarce-data problem
+        toward priors and pretrained models — instead of a fixed tier list.
+        ``sub_problems`` names the parts of the task an avenue may target.
+        """
+        from .analysis import ProblemAnalysis, record_analysis
+
+        analysis = ProblemAnalysis(
+            structure=structure,
+            knowledge=knowledge,
+            data_regime=data_regime,
+            generalization=generalization,
+            evidence=evidence,
+            sub_problems=tuple(sub_problems),
+            hard_cases=hard_cases,
+            analyzed_by=analyzed_by,
+        )
+        record_analysis(self._workspace, analysis)
+        return analysis.to_dict()
+
+    @property
+    def problem_analysis(self) -> dict | None:
+        from .analysis import load_analysis
+
+        analysis = load_analysis(self._workspace)
+        return None if analysis is None else analysis.to_dict()
+
+    def plan_portfolio(
+        self, specs, *, exclusions=None, policy=None, fill_missing: bool = False
+    ):
+        """Record a plan authored by this Pi session: analyzed, researched, falsifiable.
+
+        Every host-authored avenue must carry a falsifier; every feasible
+        approach family must be attempted or skipped with a reason. The
+        library no longer pads the plan with generic per-tier avenues unless
+        ``fill_missing=True`` is asked for explicitly — a generic "train a
+        classical model" avenue is coverage theatre, not a hypothesis.
+        """
         from dataclasses import replace
 
-        from .portfolio import AvenueSpec, Portfolio, PortfolioPolicy
+        from .analysis import ensure_analyzed
+        from .portfolio import (
+            UNCOVERED_TIER_REASON,
+            AvenueSpec,
+            Portfolio,
+            PortfolioPolicy,
+        )
         from .research import ensure_researched
         from .resources import Resources
 
+        analysis = ensure_analyzed(self._workspace)
         evidence = ensure_researched(self._workspace)
         metric_mod.ensure_approved(self._workspace)
         resources = Resources.from_dict(
@@ -437,8 +504,17 @@ class AgentHarness:
         )
         known_sources = set(sources)
         normalized = []
+        known_targets = set(analysis.sub_problem_ids)
         for raw in specs:
             spec = raw if isinstance(raw, AvenueSpec) else AvenueSpec.from_dict(raw)
+            spec.require_hypothesis_contract()
+            unknown = set(spec.targets) - known_targets
+            if unknown:
+                raise ValueError(
+                    f"Avenue {spec.id!r} targets sub-problems {sorted(unknown)} "
+                    f"that the problem analysis does not name (known: "
+                    f"{sorted(known_targets)}). Add them via prg.analyze_problem."
+                )
             if not spec.research_sources:
                 spec = replace(spec, research_sources=sources)
             elif not set(spec.research_sources).issubset(known_sources):
@@ -458,12 +534,19 @@ class AgentHarness:
             raise TypeError("policy= must be PortfolioPolicy, a dict, or None.")
         if effective_policy is None and guards.is_bootstrap(self._workspace):
             effective_policy = PortfolioPolicy(min_configs_before_abandon=1)
+        # exclusions=None keeps the strict rule: undecided tiers raise. An
+        # explicit dict is the host's list of reasoned skips; a bare "decided"
+        # marker lets it skip one tier under the standard reason.
+        effective_exclusions = {
+            int(k): (UNCOVERED_TIER_REASON if v in (None, "", True) else str(v))
+            for k, v in (exclusions or {}).items()
+        }
         portfolio = Portfolio.create(
             resources,
             normalized,
-            exclusions=exclusions,
+            exclusions=effective_exclusions,
             policy=effective_policy,
-            fill_missing=True,
+            fill_missing=fill_missing,
         )
         for avenue in portfolio.avenues:
             if not avenue.spec.research_sources:

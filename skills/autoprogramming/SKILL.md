@@ -168,14 +168,23 @@ prg = ap.attach(prepared.workspace.root)
 
 Propose metric code yourself in this conversation, demonstrate every lens on
 real examples, obtain explicit user approval, then write/approve the suite. Next,
-**search before planning**:
+**analyze, then search, then plan** — all three are enforced gates:
 
 ```py
+prg.analyze_problem(
+    structure="...",       # language, geometry, dynamics, causality, constraints?
+    knowledge="...",       # laws, domain expertise, simulators, references beyond the examples?
+    data_regime="...",     # rich/scarce, clean/noisy, what the labels measure
+    generalization="...",  # new inputs, populations, conditions, interventions?
+    evidence="...",        # what separates a real solution from a convincing imitation
+    hard_cases="...",
+    sub_problems=[ap.SubProblem("terms", "glossary lookup", needs="exact match"), ...],
+)
 print(prg.web_search("latest efficient models and methods for <abstract task>"))
 print(prg.web_search("2026 open source <task> benchmark best approaches"))
 # Inspect sources; never put private examples in a query.
 
-prg.plan_portfolio(web_informed_avenue_specs)
+prg.plan_portfolio(avenue_specs, exclusions={<tier>: "<reason it is skipped>"})
 status = prg.orchestrate_portfolio(
     "breadth", budget=ap.Budget(dollars=20)
 )
@@ -185,9 +194,17 @@ status = prg.orchestrate_portfolio("compose")
 report = prg.finalize()  # only when status says may_finalize
 ```
 
-`web_informed_avenue_specs` is the current orchestrator's task-specific list of
-`ap.AvenueSpec` objects; each may cite `research_sources`. `plan_portfolio()`
-refuses until at least two searches and two distinct sources are recorded.
+`avenue_specs` is the current orchestrator's list of `ap.AvenueSpec` **bets**.
+Each needs a `hypothesis`, a `falsifier` (the cheapest experiment that could
+disprove it), `expected_quality` / `expected_cost_dollars` / `confidence`, and
+may cite `research_sources`, target analysis `sub_problems` via `targets`, or be
+flagged `long_shot`. Let the analysis point to mechanisms — differential
+equations, simulation, causal models, retrieval, feature engineering, plain
+code — rather than walking a tier list. The ladder below is a breadth
+checklist: every feasible family is attempted or skipped with a stated reason;
+the library no longer pads a plan with generic per-tier avenues.
+`plan_portfolio()` refuses without a recorded analysis, two searches with two
+distinct sources, or an avenue lacking a falsifier.
 Outside a live Pi session, a caller may explicitly choose the legacy headless
 `PiOrchestratorBackend`; that fallback owns its own web-enabled strategy process.
 
@@ -247,15 +264,19 @@ What happens mechanically:
   candidates whose own code/artifact bundle changed and can't be recovered.
   Diagnostic roles may evolve, but acceptance roles/floors/preference are
   precommitted before val and cannot be changed afterward.
-- The controller loop is: require one avenue in every resource-feasible tier,
-  dispatch those avenues to parallel Pi workers, baseline the portfolio on
-  **val** and read the
+- The controller loop is: require every resource-feasible family to be
+  attempted or reasoned away, dispatch the avenues to parallel Pi workers,
+  smoke-probe each implementation on a few train rows before paying for a full
+  evaluation, baseline the portfolio on **val** and read the
   quality/cost frontier (`prg.tradeoffs()`), deepen and compose the promising
   tiers by reflecting on **train** failures (full traces allowed) and selecting
   on **val** (aggregate scores only), all within budget. **test** is
   untouchable until `finalize()` evaluates it once, at the end, on the top
   candidates, and activates the winner. See
   [references/prg-api.md](references/prg-api.md) for the full loop.
+- Workers that see a better approach write it to `ideas.md`; the controller
+  records it as the avenue's `proposed_ideas` for you to plan as a new avenue.
+  Fidelity holds inside an experiment; new ideas travel between experiments.
 - A worker crash, malformed output, noncompliant source, dependency mistake, or
   suspicious zero result never satisfies breadth and never proves the approach
   failed. The controller diagnoses and repairs within the same mechanism, then
