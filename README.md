@@ -11,6 +11,15 @@ Define your inputs and outputs, and let AutoProgramming find the best implementa
 
 **Why this is different.** Prompt optimizers (DSPy, GEPA, TextGrad) search over prompts inside a framework you must ship with. In AutoProgramming, a candidate implementation is a **plain `.py` file** — so the search space is anything Python can express (an LLM call, a regex table, scikit-learn, a local transformer, a pipeline of all four), and the optimizer is a **coding agent** that reflects, edits, and evaluates. Most frontier points ship as ordinary portable code with no optimizer dependency. A Pi-subscription-backed runtime is also allowed as an explicitly labelled frontier point (`requires Pi + login`), so the user—not an early feasibility heuristic—decides whether that restriction is acceptable.
 
+## Install
+
+```sh
+uv add "git+https://github.com/MaximeRivest/autoprogramming.git"
+uv run autoprogramming install-skill   # copies the agent skills to ~/.agents/skills
+```
+
+The second line matters: coding agents (Pi, Claude Code, Codex, Cursor, ...) discover skills from `~/.agents/skills` or a project's `.agents/skills`, never from site-packages. After it, start your agent in a project and ask it to use the `autoprogramming` skill. `uv` must be on PATH: candidates with third-party dependencies run in their own `uv`-resolved environments.
+
 ## Define a program
 
 Types are subclasses of builtins. Docstrings become descriptions the agent uses.

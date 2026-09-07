@@ -18,10 +18,14 @@ a portable Python package with zero runtime dependence on the optimizer.
 ## Install
 
 ```sh
-uv add "git+https://github.com/lillyguisnet/autoprogramming.git"
-# or: pip install "git+https://github.com/lillyguisnet/autoprogramming.git"
+uv add "git+https://github.com/MaximeRivest/autoprogramming.git"
+# or: pip install "git+https://github.com/MaximeRivest/autoprogramming.git"
+uv run autoprogramming install-skill            # -> ~/.agents/skills (add --project for ./.agents/skills)
 ```
 
+- `install-skill` copies this skill and the workspace `candidate-optimizer`
+  skill out of the package into a directory coding agents discover; site-packages
+  alone is invisible to them. Re-run after upgrading; `--force` replaces edits.
 - Requires Python >= 3.12.
 - `uv` must be on PATH at evaluation time: candidates that declare third-party
   dependencies run under `uv run --no-project` in their own ephemeral

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Shipped the conversational front-end skill inside the package and added the
+  `autoprogramming install-skill` command, which copies both agent skills into
+  `~/.agents/skills` (or `./.agents/skills` with `--project`) where coding
+  agents actually discover them.
 - Made planning analysis-first: `prg.analyze_problem` records the problem's
   structure, available knowledge, data regime, generalization target, evidence
   standard, hard cases, and sub-problems, and `plan_portfolio` refuses without it
